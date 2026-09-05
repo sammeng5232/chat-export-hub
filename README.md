@@ -21,6 +21,9 @@ Unified desktop app for **live chat history exports** across multiple AI agents.
 | WorkBuddy CN | `~/workbuddy_cn_chat_live_exports` | `~/.workbuddy/projects` |
 | Trae | `~/trae_chat_live_exports` | Trae + TRAE SOLO `ModularData/ai-agent` |
 | Trae CN | `~/trae_cn_chat_live_exports` | Trae CN + TRAE SOLO CN `ModularData/ai-agent` |
+| Cline CLI | `~/cline_chat_live_exports` | `~/.cline/data/sessions` (Cline Chat Export Watcher) |
+| Continue | `~/continue_chat_live_exports` | `~/.continue/sessions` (Continue Chat Export Watcher) |
+| Pi Agent | `~/pi_chat_live_exports` | `~/.pi/agent/sessions` (Pi Chat Export Watcher) |
 
 ## Watcher tasks
 
@@ -32,6 +35,9 @@ Scheduled tasks keep exports live (logon trigger + 5-minute revival, 30s scan in
 | Grok Chat Export Watcher | `install_grok_chat_export_task.ps1` |
 | OpenCode Chat Export Watcher | `install_opencode_chat_export_task.ps1` |
 | Kilo Code Chat Export Watcher | `install_kilo_chat_export_task.ps1` |
+| Cline Chat Export Watcher | `install_cline_chat_export_task.ps1` |
+| Continue Chat Export Watcher | `install_continue_chat_export_task.ps1` |
+| Pi Chat Export Watcher | `install_pi_chat_export_task.ps1` |
 
 Agents without a watcher task export only when triggered from the hub UI.
 
@@ -75,6 +81,9 @@ No UI code changes required for simple agents that share the same state layout.
 - `export_kilocode_chats_live.py` — Kilo Code (CLI `kilo.db` + VS Code extension storage)
 - `export_kiro_chats_live.py` — Kiro
 - `export_trae_chats_live.py` — Trae / Trae CN
+- `export_cline_chats_live.py` — Cline CLI
+- `export_continue_chats_live.py` — Continue extension
+- `export_pi_chats_live.py` — pi agent
 - `grok_export_monitor.py` — Grok export monitor
 - `install_*_chat_export_task.ps1` — scheduled watcher installers
 - `build_chat_export_hub.ps1` — PyInstaller build + sign + shortcuts

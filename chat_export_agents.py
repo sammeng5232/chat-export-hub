@@ -71,6 +71,9 @@ WORKBUDDY_EXPORTER = TOOLS / "export_workbuddy_chats_live.py"
 KILO_EXPORTER = TOOLS / "export_kilocode_chats_live.py"
 KIRO_EXPORTER = TOOLS / "export_kiro_chats_live.py"
 TRAE_EXPORTER = TOOLS / "export_trae_chats_live.py"
+CLINE_EXPORTER = TOOLS / "export_cline_chats_live.py"
+CONTINUE_EXPORTER = TOOLS / "export_continue_chats_live.py"
+PI_EXPORTER = TOOLS / "export_pi_chats_live.py"
 # Shared watcher status for the combined Codex+Claude scheduled task
 CODEX_CLAUDE_STATUS = HOME / "codex_chat_live_exports" / "watcher.status.json"
 CODEX_CLAUDE_LOG = HOME / "codex_chat_live_exports" / "watcher.log"
@@ -258,6 +261,45 @@ AGENTS: list[AgentSpec] = [
         ),
         layout="generic",
         notes="Trae CN + TRAE SOLO CN encrypted chat databases",
+    ),
+    AgentSpec(
+        id="cline",
+        name="Cline CLI",
+        short="Cline",
+        color="#ef4444",
+        output_dir=HOME / "cline_chat_live_exports",
+        source_home=HOME / ".cline",
+        exporter=CLINE_EXPORTER,
+        export_args=("--once",),
+        task_name="Cline Chat Export Watcher",
+        layout="generic",
+        notes="Cline CLI sessions under ~/.cline/data/sessions",
+    ),
+    AgentSpec(
+        id="continue",
+        name="Continue",
+        short="Continue",
+        color="#a855f7",
+        output_dir=HOME / "continue_chat_live_exports",
+        source_home=HOME / ".continue",
+        exporter=CONTINUE_EXPORTER,
+        export_args=("--once",),
+        task_name="Continue Chat Export Watcher",
+        layout="generic",
+        notes="Continue extension sessions under ~/.continue/sessions",
+    ),
+    AgentSpec(
+        id="pi",
+        name="Pi Agent",
+        short="Pi",
+        color="#14b8a6",
+        output_dir=HOME / "pi_chat_live_exports",
+        source_home=HOME / ".pi",
+        exporter=PI_EXPORTER,
+        export_args=("--once",),
+        task_name="Pi Chat Export Watcher",
+        layout="generic",
+        notes="pi agent sessions under ~/.pi/agent/sessions",
     ),
 ]
 
