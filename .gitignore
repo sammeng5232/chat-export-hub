@@ -1,0 +1,17 @@
+# Build artifacts
+build/
+dist/
+__pycache__/
+*.exe
+*.spec.bak
+
+# Code-signing certificates (never commit)
+certs/
+*.pfx
+*.cer
+
+# Local settings / scratch
+chat_export_hub_settings.json
+_explore_tmp.py
+*.log
+*.log.*
