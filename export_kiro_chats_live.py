@@ -75,6 +75,9 @@ def session_files() -> list[tuple[Path, str]]:
         roots.extend(((wsl_root / "sessions", tag), (wsl_root / "chats", tag)))
     for wsl_root, tag in wsl_agent_homes(".config/Kiro/User/globalStorage/kiro.kiroagent"):
         roots.append((wsl_root, tag))
+    # Windows-guest VMs keep the IDE store under AppData/Roaming.
+    for wsl_root, tag in wsl_agent_homes("AppData/Roaming/Kiro/User/globalStorage/kiro.kiroagent"):
+        roots.append((wsl_root, tag))
 
     found: list[tuple[Path, str]] = []
     for root, tag in roots:
@@ -101,6 +104,14 @@ def vscdb_sources() -> list[tuple[Path, str, Path]]:
         staged = stage_wsl_sqlite(unc_db)
         if staged is not None:
             out.append((staged, tag, unc_db))
+    # Windows-guest VMs keep state.vscdb under AppData/Roaming.
+    for wsl_root, tag in wsl_agent_homes("AppData/Roaming/Kiro/User/globalStorage"):
+        vm_db = wsl_root / "state.vscdb"
+        if not vm_db.exists():
+            continue
+        staged = stage_wsl_sqlite(vm_db)
+        if staged is not None:
+            out.append((staged, tag, vm_db))
     return out
 
 

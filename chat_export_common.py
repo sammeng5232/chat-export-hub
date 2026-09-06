@@ -387,7 +387,7 @@ def write_manifest(
 
 
 def is_wsl_source_record(source_key: str, record: dict[str, Any] | None = None) -> bool:
-    """Return whether provenance identifies a WSL source (never by output title)."""
+    """Return whether provenance identifies a remote source (WSL or VM)."""
     values = [str(source_key)]
     if record:
         for field in ("source", "source_db", "session_dir"):
@@ -399,6 +399,14 @@ def is_wsl_source_record(source_key: str, record: dict[str, Any] | None = None) 
         if normalized.startswith(("//wsl.localhost/", "//wsl$/")):
             return True
         if "@wsl-" in normalized:
+            return True
+        if "@vbox-" in normalized:
+            return True
+        if "@ssh-" in normalized:
+            return True
+        if "/chatexporthub/staging/vbox-" in normalized:
+            return True
+        if "/chatexporthub/staging/ssh-" in normalized:
             return True
     return False
 
@@ -577,7 +585,10 @@ def wsl_distro_names() -> list[str]:
     if not names and os.name == "nt":
         try:
             raw = subprocess.check_output(
-                ["wsl.exe", "-l", "-q"], stderr=subprocess.DEVNULL, timeout=5
+                ["wsl.exe", "-l", "-q"],
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             text = raw.decode("utf-16", errors="ignore")
             if "\x00" in text:
@@ -624,6 +635,12 @@ def wsl_agent_homes(relative: str) -> list[tuple[Path, str]]:
 
     ``relative`` is a POSIX-style path relative to a WSL user home, e.g.
     ``.claude`` or ``.local/share/kilo``. Returns ``(dir, tag)`` pairs.
+
+    Results also fold in Oracle VM (VirtualBox) staged homes (``vbox-<vm>``
+    tags) and configured remote SSH machines (``ssh-<alias>`` tags). Every
+    exporter — including the bytecode-only Codex/Claude loader, which cannot
+    be edited — resolves remote homes through this one function, so the
+    union gives all of them remote coverage.
     """
     rel = relative.replace("/", os.sep) if os.sep != "/" else relative
     out: list[tuple[Path, str]] = []
@@ -634,6 +651,8 @@ def wsl_agent_homes(relative: str) -> list[tuple[Path, str]]:
                 out.append((candidate, tag))
         except OSError:
             continue
+    out.extend(vbox_agent_homes(relative))
+    out.extend(remote_ssh_agent_homes(relative))
     return out
 
 
@@ -709,3 +728,411 @@ def stage_wsl_sqlite(unc_db: Path) -> Path | None:
         return staged_db
     except OSError:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Oracle VM (VirtualBox) support: pull agent directories from every running
+# VirtualBox VM through its key-based SSH alias and scan local staged copies.
+#
+# VMs are discovered via VBoxManage. A VM contributes data only while it is
+# running AND ~/.ssh/config defines a Host entry named exactly like the VM
+# (e.g. ``Host vm1``) with working key auth — no passwords are stored. Both
+# Windows and Linux guests are supported; the guest profile root resolves
+# through ``whoami``.
+# ---------------------------------------------------------------------------
+
+VBOX_MANAGE_CANDIDATES = [
+    r"C:\Program Files\Oracle\VirtualBox\VBoxManage.exe",
+    r"C:\Program Files (x86)\Oracle\VirtualBox\VBoxManage.exe",
+]
+VBOX_SYNC_INTERVAL = float(os.environ.get("CHAT_EXPORT_VBOX_SYNC_INTERVAL", "300"))
+VBOX_ATTEMPT_BACKOFF = float(os.environ.get("CHAT_EXPORT_VBOX_BACKOFF", "120"))
+VBOX_LOCK_STALE_AFTER = 900.0
+VBOX_SSH_TIMEOUT = 600.0
+
+# Directories pulled from each VM user profile. Whole agent homes except
+# .claude/.codex, which accumulate caches no exporter reads.
+VBOX_PULL_RELPATHS = [
+    ".claude/projects",
+    ".claude/history.jsonl",
+    ".claude.json",
+    ".codex/sessions",
+    ".codex/archived_sessions",
+    ".grok",
+    ".local/share/kilo",
+    ".local/share/opencode",
+    ".kiro",
+    "AppData/Roaming/Kiro/User/globalStorage/kiro.kiroagent",
+    "AppData/Roaming/Kiro/User/globalStorage/state.vscdb",
+    ".workbuddy",
+    ".workbuddy-ai",
+    ".cline",
+    ".continue",
+    ".pi",
+    "AppData/Roaming/TRAE SOLO",
+    "AppData/Roaming/TRAE SOLO CN",
+]
+
+_vbox_vm_cache: tuple[float, list[tuple[str, bool]]] = (0.0, [])
+_ssh_hosts_cache: tuple[float, dict[str, dict[str, str]]] = (0.0, {})
+
+
+def vbox_vms() -> list[tuple[str, bool]]:
+    """(name, running) for every registered VirtualBox VM, cached 60s."""
+    global _vbox_vm_cache
+    now = time.time()
+    if now - _vbox_vm_cache[0] < 60.0:
+        return _vbox_vm_cache[1]
+    result: list[tuple[str, bool]] = []
+    exe = os.environ.get("CHAT_EXPORT_VBOXMANAGE") or next(
+        (p for p in VBOX_MANAGE_CANDIDATES if Path(p).is_file()), None
+    )
+    if exe:
+        try:
+            listed = subprocess.run(
+                [exe, "list", "vms"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            running = subprocess.run(
+                [exe, "list", "runningvms"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if listed.returncode == 0:
+                names = re.findall(r'^"(.+)"\s+\{', listed.stdout, re.M)
+                live = set(re.findall(r'^"(.+)"\s+\{', running.stdout or "", re.M))
+                result = [(name, name in live) for name in names]
+        except (OSError, subprocess.SubprocessError):
+            result = []
+    _vbox_vm_cache = (now, result)
+    return result
+
+
+def ssh_config_hosts() -> dict[str, dict[str, str]]:
+    """Alias -> options parsed from ~/.ssh/config, cached 60s."""
+    global _ssh_hosts_cache
+    now = time.time()
+    if now - _ssh_hosts_cache[0] < 60.0:
+        return _ssh_hosts_cache[1]
+    hosts: dict[str, dict[str, str]] = {}
+    config = Path.home() / ".ssh" / "config"
+    if config.is_file():
+        current: list[str] = []
+        try:
+            lines = config.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            lines = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            key, sep, value = stripped.partition(" ")
+            if not sep:
+                continue
+            key = key.lower()
+            if key == "host":
+                current = value.split()
+                for alias in current:
+                    if "*" not in alias and "?" not in alias:
+                        hosts.setdefault(alias, {})
+            elif current:
+                for alias in current:
+                    if "*" not in alias and "?" not in alias:
+                        hosts[alias][key] = value
+    _ssh_hosts_cache = (now, hosts)
+    return hosts
+
+
+def _ssh_run(alias: str, command: str, timeout: float = 30.0) -> str | None:
+    try:
+        proc = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", alias, command],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout
+
+
+def _vbox_guest_profile(alias: str) -> Path | None:
+    """Profile root of the SSH user inside the VM (Windows or Linux guest)."""
+    probe = _ssh_run(alias, "cmd /c echo %OS%")
+    if probe is not None and "Windows_NT" in probe:
+        user = (_ssh_run(alias, "whoami") or "").strip()
+        name = user.splitlines()[0].strip() if user else ""
+        name = name.split("\\")[-1].strip()
+        return Path(f"C:/Users/{name}") if name else None
+    # Linux/macOS: ask the remote shell instead of guessing — home is not
+    # always /home/<user> (e.g. SCRP uses /home/users/<user>).
+    home = (_ssh_run(alias, "echo $HOME") or "").strip()
+    if home.startswith("/"):
+        return Path(home)
+    user = (_ssh_run(alias, "whoami") or "").strip()
+    name = user.splitlines()[0].strip() if user else ""
+    name = name.split("@")[0].strip()
+    return Path(f"/home/{name}") if name else None
+
+
+def checkpoint_staged_dbs(root: Path) -> None:
+    """Fold any -wal files into staged SQLite databases after a raw copy."""
+    try:
+        files = list(root.rglob("*"))
+    except OSError:
+        return
+    for db in files:
+        if not db.is_file():
+            continue
+        lowered = db.name.lower()
+        if not (lowered.endswith(".db") or lowered.endswith(".vscdb")):
+            continue
+        wal = Path(str(db) + "-wal")
+        if not wal.is_file():
+            continue
+        try:
+            con = sqlite3.connect(db)
+            try:
+                con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            finally:
+                con.close()
+            wal.unlink(missing_ok=True)
+            Path(str(db) + "-shm").unlink(missing_ok=True)
+        except (sqlite3.Error, OSError):
+            continue
+
+
+def _vbox_staging_root(tag: str) -> Path:
+    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    return Path(base) / "ChatExportHub" / "staging" / tag
+
+
+def _sync_ssh_machine(
+    alias: str,
+    tag: str,
+    *,
+    interval: float = VBOX_SYNC_INTERVAL,
+    backoff: float = VBOX_ATTEMPT_BACKOFF,
+    compress: bool = False,
+) -> bool:
+    """Refresh (when due) and report whether the staged remote copy is usable.
+
+    Works for VirtualBox VMs and plain remote SSH machines alike. Gates: at
+    most one sync per ``interval``, a failure ``backoff``, and an exclusive
+    lock file so the many exporter processes never pull the same machine
+    simultaneously. While another process holds the lock the existing staged
+    copy is reused. Key auth only (BatchMode); unreachable or password-only
+    machines are skipped until they become reachable.
+    """
+    staging_root = _vbox_staging_root(tag)
+    home_dir = staging_root / "home"
+    lock = staging_root / ".lock"
+    last = staging_root / ".last"
+    attempt = staging_root / ".attempt"
+
+    def _age(path: Path) -> float:
+        try:
+            return max(0.0, time.time() - path.stat().st_mtime)
+        except OSError:
+            return float("inf")
+
+    if _age(lock) < VBOX_LOCK_STALE_AFTER:
+        return home_dir.is_dir()
+    if _age(last) < interval:
+        return home_dir.is_dir()
+    if _age(attempt) < backoff:
+        return home_dir.is_dir()
+
+    try:
+        staging_root.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    attempt.touch()
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+    except FileExistsError:
+        return home_dir.is_dir()
+    try:
+        profile = _vbox_guest_profile(alias)
+        if profile is None:
+            return False
+        include = " ".join(f'"{p}"' for p in VBOX_PULL_RELPATHS)
+        remote = f'tar -c{"z" if compress else ""}f - -C "{profile.as_posix()}" {include}'
+        pull_tar = staging_root / "pull.tar"
+        try:
+            with open(pull_tar, "wb") as fh:
+                subprocess.run(
+                    [
+                        "ssh",
+                        "-o",
+                        "BatchMode=yes",
+                        "-o",
+                        "ConnectTimeout=15",
+                        alias,
+                        remote,
+                    ],
+                    stdout=fh,
+                    stderr=subprocess.DEVNULL,
+                    timeout=VBOX_SSH_TIMEOUT,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+        except (OSError, subprocess.SubprocessError):
+            pull_tar.unlink(missing_ok=True)
+            return False
+        try:
+            ok = pull_tar.is_file() and pull_tar.stat().st_size > 0
+        except OSError:
+            ok = False
+        if not ok:
+            pull_tar.unlink(missing_ok=True)
+            return False
+        # bsdtar exits non-zero when some requested dirs are missing; the
+        # archive still contains every entry that exists, which is fine.
+        tmp_dir = staging_root / ".pull.tmp"
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        tmp_dir.mkdir(parents=True)
+        try:
+            subprocess.run(
+                ["tar", "-xzf" if compress else "-xf", str(pull_tar), "-C", str(tmp_dir)],
+                check=True,
+                capture_output=True,
+                timeout=VBOX_SSH_TIMEOUT,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except (OSError, subprocess.SubprocessError):
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            pull_tar.unlink(missing_ok=True)
+            return False
+        pull_tar.unlink(missing_ok=True)
+        checkpoint_staged_dbs(tmp_dir)
+        retired = staging_root / ".home.retired"
+        shutil.rmtree(retired, ignore_errors=True)
+        if home_dir.exists():
+            home_dir.rename(retired)
+        tmp_dir.rename(home_dir)
+        shutil.rmtree(retired, ignore_errors=True)
+        last.touch()
+        return True
+    finally:
+        lock.unlink(missing_ok=True)
+
+
+def vbox_agent_homes(relative: str) -> list[tuple[Path, str]]:
+    """Staged ``<relative>`` agent directories for every reachable VM.
+
+    A VM contributes entries while it runs and ~/.ssh/config defines a Host
+    alias named exactly like the VM with working key auth. Tags look like
+    ``vbox-vm1``. Data is pulled at most every VBOX_SYNC_INTERVAL seconds
+    into ``%LOCALAPPDATA%\\ChatExportHub\\staging\\vbox-<vm>\\home``.
+    """
+    rel = relative.replace("/", os.sep) if os.sep != "/" else relative
+    out: list[tuple[Path, str]] = []
+    hosts = ssh_config_hosts()
+    for vm, running in vbox_vms():
+        if not running or vm not in hosts:
+            continue
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", vm).strip("_") or "vm"
+        tag = f"vbox-{safe}"
+        try:
+            if not _sync_ssh_machine(vm, tag):
+                continue
+        except OSError:
+            continue
+        candidate = _vbox_staging_root(tag) / "home" / rel
+        try:
+            if candidate.is_dir():
+                out.append((candidate, tag))
+        except OSError:
+            continue
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Remote SSH machines beyond VirtualBox (e.g. university servers reachable
+# only from certain networks). Aliases come from chat_export_remote_hosts.json
+# beside this module ({"hosts": ["alias", ...]}) or the CHAT_EXPORT_REMOTE_HOSTS
+# environment variable. Each alias must have a working key-auth Host entry in
+# ~/.ssh/config. Unreachable machines are skipped with a backoff and their
+# existing exports are retained, so coverage resumes automatically once the
+# network path exists (campus / VPN).
+# ---------------------------------------------------------------------------
+
+REMOTE_SYNC_INTERVAL = float(os.environ.get("CHAT_EXPORT_REMOTE_SYNC_INTERVAL", "900"))
+REMOTE_ATTEMPT_BACKOFF = float(os.environ.get("CHAT_EXPORT_REMOTE_BACKOFF", "600"))
+_remote_hosts_cache: tuple[float, list[str]] = (0.0, [])
+
+
+def configured_remote_hosts() -> list[str]:
+    """SSH aliases of extra remote machines to cover, cached 60s."""
+    global _remote_hosts_cache
+    override = os.environ.get("CHAT_EXPORT_REMOTE_HOSTS", "")
+    if override.strip():
+        return [x.strip() for x in override.split(",") if x.strip()]
+    now = time.time()
+    if now - _remote_hosts_cache[0] < 60.0:
+        return _remote_hosts_cache[1]
+    hosts: list[str] = []
+    # Frozen .exe: __file__ points at the PyInstaller temp dir, so prefer the
+    # JSON sitting next to the executable; fall back to beside this module
+    # (source runs). First existing file wins.
+    candidates: list[Path] = []
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).with_name("chat_export_remote_hosts.json"))
+    candidates.append(Path(__file__).with_name("chat_export_remote_hosts.json"))
+    config = next((c for c in candidates if c.is_file()), None)
+    if config is not None:
+        try:
+            data = json.loads(config.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            data = {}
+        if isinstance(data, dict):
+            value = data.get("hosts", [])
+            if isinstance(value, list):
+                hosts.extend(str(x).strip() for x in value if str(x).strip())
+    hosts = [h for h in dict.fromkeys(hosts) if h]
+    _remote_hosts_cache = (now, hosts)
+    return hosts
+
+
+def remote_ssh_agent_homes(relative: str) -> list[tuple[Path, str]]:
+    """Staged ``<relative>`` agent directories for configured remote machines.
+
+    Tags look like ``ssh-scrp``. Data is pulled at most every
+    REMOTE_SYNC_INTERVAL seconds (default 15 min — these machines are often
+    reached over slower networks); failures back off for
+    REMOTE_ATTEMPT_BACKOFF seconds before retrying.
+    """
+    rel = relative.replace("/", os.sep) if os.sep != "/" else relative
+    out: list[tuple[Path, str]] = []
+    for alias in configured_remote_hosts():
+        if alias not in ssh_config_hosts():
+            continue
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", alias).strip("_") or "remote"
+        tag = f"ssh-{safe}"
+        try:
+            if not _sync_ssh_machine(
+                alias,
+                tag,
+                interval=REMOTE_SYNC_INTERVAL,
+                backoff=REMOTE_ATTEMPT_BACKOFF,
+                compress=True,
+            ):
+                continue
+        except OSError:
+            continue
+        candidate = _vbox_staging_root(tag) / "home" / rel
+        try:
+            if candidate.is_dir():
+                out.append((candidate, tag))
+        except OSError:
+            continue
+    return out

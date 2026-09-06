@@ -179,6 +179,15 @@ def source_location(source: str, source_key: str = "", output: str = "") -> str:
     match = re.search(r"@wsl-([^:/\\]+)", haystack, re.IGNORECASE)
     if match:
         return f"WSL: {match.group(1)}"
+    match = re.search(r"@vbox-([^:/\\]+)", haystack, re.IGNORECASE)
+    if match:
+        return f"VM: {match.group(1)}"
+    match = re.search(r"@ssh-([^:/\\]+)", haystack, re.IGNORECASE)
+    if match:
+        return f"SSH: {match.group(1)}"
+    match = re.search(r"chatexporthub/staging/(?:vbox|ssh)-([^/\\]+)/", normalized, re.IGNORECASE)
+    if match:
+        return f"VM: {match.group(1)}" if "/staging/vbox-" in normalized.lower() else f"SSH: {match.group(1)}"
     return "Local"
 
 

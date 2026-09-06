@@ -41,6 +41,7 @@ from chat_export_common import (
     run_watcher_loop,
     scrub_internal_lines,
     should_skip_user_text,
+    wsl_agent_homes,
     write_manifest,
 )
 
@@ -713,6 +714,8 @@ def collect_db_files(db: Path) -> list[Path]:
 
 def scan_product(
     product: str,
+    db: Path,
+    tag: str,
     output_dir: Path,
     memory_map: dict[str, list[Path]],
     old_sources: dict[str, Any],
@@ -721,11 +724,11 @@ def scan_product(
     seen: set[str],
     ordinal_start: int,
 ) -> tuple[int, int]:
-    db = product_db(product)
     changed = 0
     ordinal = ordinal_start
     if not db.exists():
         return changed, ordinal
+    tag_part = f"@{tag}" if tag else ""
 
     dec: Path | None = None
     try:
@@ -741,12 +744,15 @@ def scan_product(
         finally:
             con.close()
     except Exception as exc:
-        source_key = f"{product}:decrypt-error"
+        source_key = f"{product}{tag_part}:decrypt-error"
         seen.add(source_key)
         ordinal += 1
         title = one_line(f"{product} decrypt error", 80)
         prefix = first_iso_timestamp_prefix(None, ordinal)
-        output_path = filesystem_safe_output_path(output_dir, f"{prefix}__{product}__", title)
+        error_stem = (
+            f"{prefix}__{tag}_{product}__" if tag else f"{prefix}__{product}__"
+        )
+        output_path = filesystem_safe_output_path(output_dir, error_stem, title)
         lines = [
             "Local Trae chat export",
             f"Product: {product}",
@@ -787,12 +793,13 @@ def scan_product(
         if session.get("deleted"):
             continue
         sid = session["session_id"]
-        source_key = f"{product}:{sid}"
+        source_key = f"{product}{tag_part}:{sid}"
         seen.add(source_key)
         ordinal += 1
         title = one_line(session.get("title") or sid, 80)
         prefix = first_iso_timestamp_prefix(session.get("created"), ordinal)
-        output_path = filesystem_safe_output_path(output_dir, f"{prefix}__{sid}__", title)
+        stem = f"{prefix}__{sid}__" if not tag else f"{prefix}__{tag}_{sid}__"
+        output_path = filesystem_safe_output_path(output_dir, stem, title)
         mem_paths = memory_map.get(sid) or []
         mem_fp = fingerprint_paths(mem_paths)
         old = old_sources.get(source_key, {})
@@ -860,17 +867,23 @@ def scan_once(
     memory_map = load_memory_files(memory_roots)
 
     for product in products:
-        extra, ordinal = scan_product(
-            product,
-            output_dir,
-            memory_map,
-            old_sources,
-            new_sources,
-            records,
-            seen,
-            ordinal,
-        )
-        changed += extra
+        sources: list[tuple[Path, str]] = [(product_db(product), "")]
+        for vm_root, tag in wsl_agent_homes(f"AppData/Roaming/{product}"):
+            sources.append((vm_root / "ModularData" / "ai-agent" / "database.db", tag))
+        for db, tag in sources:
+            extra, ordinal = scan_product(
+                product,
+                db,
+                tag,
+                output_dir,
+                memory_map,
+                old_sources,
+                new_sources,
+                records,
+                seen,
+                ordinal,
+            )
+            changed += extra
 
     # Memory-only sessions (no matching decrypted row)
     known_ids = {rec.get("session_id") for rec in records}

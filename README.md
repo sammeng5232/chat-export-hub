@@ -41,12 +41,47 @@ Scheduled tasks keep exports live (logon trigger + 5-minute revival, 30s scan in
 
 Agents without a watcher task export only when triggered from the hub UI.
 
+## Remote sources: WSL distros + Oracle VMs + remote SSH machines
+
+Every exporter scans the local Windows home **plus** remote agent homes and
+merges the results into the same export folders:
+
+- **WSL** — every distro registered for the current user, read through
+  `\\wsl.localhost\<distro>` UNC paths (auto-discovered; SQLite databases are
+  staged locally because WAL dbs cannot be read over 9P). Tags: `wsl-<distro>`.
+- **Oracle VM (VirtualBox)** — every VM that is running and has a key-auth
+  `Host <vm-name>` entry in `~/.ssh/config` (e.g. `Host vm1`). Agent dirs are
+  `tar`-pulled over SSH into `%LOCALAPPDATA%\ChatExportHub\staging\vbox-<vm>\`
+  at most every 5 minutes, SQLite WALs are folded into the staged copies, and
+  the staging lock keeps the many watcher processes from pulling the same VM
+  twice. No VM passwords are stored anywhere. Tags: `vbox-<vm>`.
+  Works for Windows and Linux guests; the guest profile resolves via `whoami`.
+- **Remote SSH machines** (e.g. `cuhkecon` = scrp-login.econ.cuhk.edu.hk) —
+  aliases listed in `chat_export_remote_hosts.json` (beside the exporters;
+  git-ignored) or `CHAT_EXPORT_REMOTE_HOSTS`. Each alias needs a key-auth
+  `Host` entry in `~/.ssh/config`. Sync every 15 min (compressed tar) with a
+  10-minute failure backoff. Tags: `ssh-<alias>`.
+
+Remote sessions carry a `@wsl-…` / `@vbox-…` / `@ssh-…` marker in their source
+keys (and usually in the file name), show a **WSL: … / VM: … / SSH: …** label
+in the hub's Location column, and survive outages: while a remote source is
+unreachable its existing exports are retained, not pruned. Machines that are
+only reachable from campus/VPN simply resume syncing once the network path
+exists.
+
+To cover a new VirtualBox VM: install Guest SSH with key auth, add a NAT port
+forward, and append a `Host <vm-name>` block to `~/.ssh/config` named exactly
+like the VirtualBox VM. To cover another server: add the key-auth ssh config
+entry plus the alias in `chat_export_remote_hosts.json`. No exporter changes
+needed. Tune with `CHAT_EXPORT_VBOX_SYNC_INTERVAL` (default 300) and
+`CHAT_EXPORT_REMOTE_SYNC_INTERVAL` (default 900) if desired.
+
 ## UI features
 
 - Sidebar: **All agents** or one agent
 - Live status chips per agent (LIVE / STALE / counts)
 - Combined stats: tracked files, size, messages, tool I/O
-- Filterable table of every export
+- Filterable table of every export (Location column: Local / WSL / VM / SSH)
 - Watcher log tail
 - **Export selected / Export all once**
 - Open export, reveal in Explorer, copy path, task status
@@ -74,7 +109,7 @@ No UI code changes required for simple agents that share the same state layout.
 - `chat_export_hub.py` — GUI
 - `chat_export_agents.py` — agent registry
 - `chat_export_i18n.py` — strings
-- `chat_export_common.py` — shared exporter helpers
+- `chat_export_common.py` — shared exporter helpers incl. WSL/VM remote-home discovery, SQLite staging, and outage-safe pruning
 - `export_grok_chats_live.py` — Grok exporter
 - `export_opencode_chats_live.py` — OpenCode exporter (session/message/part SQLite schema, reused by Kilo CLI)
 - `export_workbuddy_chats_live.py` — WorkBuddy / WorkBuddy CN
@@ -87,4 +122,4 @@ No UI code changes required for simple agents that share the same state layout.
 - `grok_export_monitor.py` — Grok export monitor
 - `install_*_chat_export_task.ps1` — scheduled watcher installers
 - `build_chat_export_hub.ps1` — PyInstaller build + sign + shortcuts
-- `~/.codex/tools/export_codex_claude_chats_live.py` — Codex + Claude exporter (lives with the Codex install)
+- `~/.codex/tools/export_codex_claude_chats_live.py` — Codex + Claude exporter (lives with the Codex install; currently a loader that exec's the last verified bytecode build because the source was lost — it still picks up WSL/VM support through `chat_export_common`)

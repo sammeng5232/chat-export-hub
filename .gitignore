@@ -18,6 +18,8 @@ certs/
 
 # Local settings / scratch
 chat_export_hub_settings.json
+chat_export_remote_hosts.json
 _explore_tmp.py
 *.log
 *.log.*
+*.exe.old
