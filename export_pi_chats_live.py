@@ -33,6 +33,7 @@ from chat_export_common import (
     run_watcher_loop,
     scrub_internal_lines,
     should_skip_user_text,
+    wsl_agent_homes,
     write_manifest,
 )
 
@@ -168,8 +169,11 @@ def scan_once(home: Path, output_dir: Path) -> tuple[int, int, int]:
     changed = 0
     ordinal = 0
 
-    sessions_root = home / "agent" / "sessions"
-    if sessions_root.is_dir():
+    scan_homes: list[tuple[Path, str]] = [(home, "")] + wsl_agent_homes(".pi")
+    for scan_home, home_tag in scan_homes:
+        sessions_root = scan_home / "agent" / "sessions"
+        if not sessions_root.is_dir():
+            continue
         for path in sorted(sessions_root.glob("*/*.jsonl")):
             ordinal += 1
             source_key = str(path)
@@ -185,8 +189,13 @@ def scan_once(home: Path, output_dir: Path) -> tuple[int, int, int]:
                 updated = ""
             prefix = first_iso_timestamp_prefix(created or None, ordinal)
             title = guess_title(messages)
+            stem = (
+                f"{prefix}__{sid[:36]}__"
+                if not home_tag
+                else f"{prefix}__{home_tag}_{sid[:36]}__"
+            )
             output_path = filesystem_safe_output_path(
-                output_dir, f"{prefix}__{sid[:36]}__", title or f"Pi {sid[:16]}"
+                output_dir, stem, title or f"Pi {sid[:16]}"
             )
             old = old_sources.get(source_key, {})
             must_export = (
@@ -241,7 +250,7 @@ def scan_once(home: Path, output_dir: Path) -> tuple[int, int, int]:
             new_sources[source_key] = record
             records.append(record)
 
-    removed = prune_removed_sources(old_sources, seen)
+    removed = prune_removed_sources(old_sources, seen, retained_sources=new_sources, retained_records=records)
     write_manifest(output_dir, "Pi Agent", records, changed, removed)
     atomic_write_json(
         state_path,

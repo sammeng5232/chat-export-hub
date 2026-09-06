@@ -33,6 +33,7 @@ from chat_export_common import (
     run_watcher_loop,
     scrub_internal_lines,
     should_skip_user_text,
+    wsl_agent_homes,
     write_manifest,
 )
 
@@ -112,16 +113,19 @@ def scan_once(home: Path, output_dir: Path) -> tuple[int, int, int]:
     changed = 0
     ordinal = 0
 
-    sessions_dir = home / "sessions"
-    index: dict[str, dict[str, Any]] = {}
-    if (sessions_dir / "sessions.json").is_file():
-        idx = load_json(sessions_dir / "sessions.json", [])
-        if isinstance(idx, list):
-            for entry in idx:
-                if isinstance(entry, dict) and entry.get("sessionId"):
-                    index[str(entry["sessionId"])] = entry
+    scan_homes: list[tuple[Path, str]] = [(home, "")] + wsl_agent_homes(".continue")
+    for scan_home, home_tag in scan_homes:
+        sessions_dir = scan_home / "sessions"
+        index: dict[str, dict[str, Any]] = {}
+        if (sessions_dir / "sessions.json").is_file():
+            idx = load_json(sessions_dir / "sessions.json", [])
+            if isinstance(idx, list):
+                for entry in idx:
+                    if isinstance(entry, dict) and entry.get("sessionId"):
+                        index[str(entry["sessionId"])] = entry
 
-    if sessions_dir.is_dir():
+        if not sessions_dir.is_dir():
+            continue
         for path in sorted(sessions_dir.glob("*.json")):
             if path.name == "sessions.json":
                 continue
@@ -149,8 +153,11 @@ def scan_once(home: Path, output_dir: Path) -> tuple[int, int, int]:
             prefix = first_iso_timestamp_prefix(created or None, ordinal)
             if not title:
                 title = guess_title(history)
+            stem = (
+                f"{prefix}__{sid}__" if not home_tag else f"{prefix}__{home_tag}_{sid}__"
+            )
             output_path = filesystem_safe_output_path(
-                output_dir, f"{prefix}__{sid}__", title or f"Continue {sid}"
+                output_dir, stem, title or f"Continue {sid}"
             )
             old = old_sources.get(source_key, {})
             must_export = (
@@ -203,7 +210,7 @@ def scan_once(home: Path, output_dir: Path) -> tuple[int, int, int]:
             new_sources[source_key] = record
             records.append(record)
 
-    removed = prune_removed_sources(old_sources, seen)
+    removed = prune_removed_sources(old_sources, seen, retained_sources=new_sources, retained_records=records)
     write_manifest(output_dir, "Continue", records, changed, removed)
     atomic_write_json(
         state_path,

@@ -34,6 +34,8 @@ from chat_export_common import (
     run_watcher_loop,
     scrub_internal_lines,
     should_skip_user_text,
+    stage_wsl_sqlite,
+    wsl_agent_homes,
     write_manifest,
 )
 
@@ -405,6 +407,38 @@ def session_title(con: sqlite3.Connection, session: dict[str, Any]) -> str:
     return session["id"]
 
 
+def db_sources(db: Path) -> list[dict[str, Any]]:
+    """The Windows opencode.db plus staged copies of every WSL distro's db.
+
+    WSL databases cannot be opened through the 9P share (WAL locking), so a
+    local staged copy is refreshed whenever the source fingerprint changes.
+    """
+    sources: list[dict[str, Any]] = [
+        {
+            "db": db,
+            "tag": "",
+            "display": db,
+            "fp_paths": [db, Path(str(db) + "-wal"), Path(str(db) + "-shm")],
+        }
+    ]
+    for wsl_dir, tag in wsl_agent_homes(".local/share/opencode"):
+        unc_db = wsl_dir / "opencode.db"
+        if not unc_db.exists():
+            continue
+        staged = stage_wsl_sqlite(unc_db)
+        if staged is None:
+            continue
+        sources.append(
+            {
+                "db": staged,
+                "tag": f"@{tag}",
+                "display": unc_db,
+                "fp_paths": [unc_db, Path(str(unc_db) + "-wal")],
+            }
+        )
+    return sources
+
+
 def scan_once(db: Path, output_dir: Path, *, include_reasoning: bool) -> tuple[int, int, int]:
     output_dir.mkdir(parents=True, exist_ok=True)
     state_path = output_dir / ".export_state.json"
@@ -415,8 +449,9 @@ def scan_once(db: Path, output_dir: Path, *, include_reasoning: bool) -> tuple[i
     seen: set[str] = set()
     changed = 0
 
-    if not db.exists():
-        removed = prune_removed_sources(old_sources, seen)
+    sources = db_sources(db)
+    if not db.exists() and len(sources) == 1:
+        removed = prune_removed_sources(old_sources, seen, retained_sources=new_sources, retained_records=records)
         write_manifest(output_dir, f"OpenCode (missing {db})", records, changed, removed)
         atomic_write_json(
             state_path,
@@ -424,67 +459,73 @@ def scan_once(db: Path, output_dir: Path, *, include_reasoning: bool) -> tuple[i
         )
         return 0, 0, removed
 
-    fingerprint = db_fingerprint(db)
-    con = connect_ro(db)
-    try:
-        sessions = load_sessions(con)
-        for ordinal, session in enumerate(sessions, 1):
-            session["source_db"] = str(db)
-            source_key = f"opencode:{session['id']}"
-            seen.add(source_key)
-            title = session_title(con, session)
-            prefix = first_iso_timestamp_prefix(session.get("created"), ordinal)
-            output_path = filesystem_safe_output_path(
-                output_dir, f"{prefix}__{session['id']}__", title
-            )
-            old = old_sources.get(source_key, {})
-            must_export = (
-                not old
-                or old.get("time_updated") != session.get("time_updated")
-                or old.get("title") != title
-                or old.get("output") != str(output_path)
-                or not Path(old.get("output") or "").exists()
-                or not output_path.exists()
-            )
-            if must_export:
-                record = export_session(
-                    con, session, title, output_path, include_reasoning=include_reasoning
+    fingerprints: list[dict[str, Any]] = []
+    for source in sources:
+        db_path: Path = source["db"]
+        tag: str = source["tag"]
+        display: Path = source["display"]
+        fingerprint = {str(p): list(file_fingerprint(p)) for p in source["fp_paths"]}
+        fingerprints.append({"db": str(display), "fingerprint": fingerprint})
+        con = connect_ro(db_path)
+        try:
+            sessions = load_sessions(con)
+            for ordinal, session in enumerate(sessions, 1):
+                session["source_db"] = str(display)
+                source_key = f"opencode{tag}:{session['id']}"
+                seen.add(source_key)
+                title = session_title(con, session)
+                prefix = first_iso_timestamp_prefix(session.get("created"), ordinal)
+                stem = f"{prefix}__{session['id']}__" if not tag else f"{prefix}__{tag}_{session['id']}__"
+                output_path = filesystem_safe_output_path(output_dir, stem, title)
+                old = old_sources.get(source_key, {})
+                must_export = (
+                    not old
+                    or old.get("time_updated") != session.get("time_updated")
+                    or old.get("title") != title
+                    or old.get("output") != str(output_path)
+                    or not Path(old.get("output") or "").exists()
+                    or not output_path.exists()
                 )
-                reuse_or_replace_output(old.get("output"), output_path)
-                changed += 1
-            else:
-                record = {
-                    "session_id": session["id"],
-                    "source_id": session["id"],
-                    "title": title,
-                    "kind": "session",
-                    "source": f"{db}#session:{session['id']}",
-                    "output": str(output_path),
-                    "created": session.get("created") or old.get("created", ""),
-                    "updated": session.get("updated") or old.get("updated", ""),
-                    "cwd": session.get("directory") or old.get("cwd", ""),
-                    "model": session.get("model") or old.get("model", ""),
-                    "parent_id": session.get("parent_id", ""),
-                    "counts": old.get("counts") or empty_counts(),
-                    "bytes": old.get(
-                        "bytes",
-                        output_path.stat().st_size if output_path.exists() else 0,
-                    ),
-                    "time_updated": session.get("time_updated"),
-                }
-            new_sources[source_key] = record
-            records.append(record)
-    finally:
-        con.close()
+                if must_export:
+                    record = export_session(
+                        con, session, title, output_path, include_reasoning=include_reasoning
+                    )
+                    reuse_or_replace_output(old.get("output"), output_path)
+                    changed += 1
+                else:
+                    record = {
+                        "session_id": session["id"],
+                        "source_id": session["id"],
+                        "title": title,
+                        "kind": "session",
+                        "source": f"{display}#session:{session['id']}",
+                        "output": str(output_path),
+                        "created": session.get("created") or old.get("created", ""),
+                        "updated": session.get("updated") or old.get("updated", ""),
+                        "cwd": session.get("directory") or old.get("cwd", ""),
+                        "model": session.get("model") or old.get("model", ""),
+                        "parent_id": session.get("parent_id", ""),
+                        "counts": old.get("counts") or empty_counts(),
+                        "bytes": old.get(
+                            "bytes",
+                            output_path.stat().st_size if output_path.exists() else 0,
+                        ),
+                        "time_updated": session.get("time_updated"),
+                    }
+                new_sources[source_key] = record
+                records.append(record)
+        finally:
+            con.close()
 
-    removed = prune_removed_sources(old_sources, seen)
+    removed = prune_removed_sources(old_sources, seen, retained_sources=new_sources, retained_records=records)
     write_manifest(output_dir, f"OpenCode {db}", records, changed, removed)
     atomic_write_json(
         state_path,
         {
             "updated_at": now_iso(),
             "db": str(db),
-            "fingerprint": fingerprint,
+            "fingerprint": fingerprints[0] if fingerprints else {},
+            "dbs": fingerprints,
             "sources": new_sources,
         },
     )

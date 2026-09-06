@@ -25,6 +25,13 @@ from typing import Any
 from urllib.parse import unquote
 
 
+_TOOLS = Path(__file__).resolve().parent
+if str(_TOOLS) not in sys.path:
+    sys.path.insert(0, str(_TOOLS))
+
+from chat_export_common import prune_removed_sources, wsl_agent_homes
+
+
 SAFE_COMPONENT_BYTES = 240
 SAFE_WINDOWS_PATH_UNITS = 240
 ATOMIC_TEMP_SUFFIX = ".tmp"
@@ -441,11 +448,14 @@ def output_path_for_session(
     output_dir: Path,
     summary: dict[str, Any],
     ordinal: int,
+    *,
+    home_tag: str = "",
 ) -> Path:
     session_id = summary.get("info", {}).get("id") or session_id_from_path(session_dir)
     created = summary.get("created_at") or summary.get("last_active_at")
     prefix = first_iso_timestamp_prefix(created if isinstance(created, str) else None, ordinal)
-    return filesystem_safe_output_path(output_dir, f"{prefix}__{session_id}__", title)
+    tagged_id = f"{home_tag}_{session_id}" if home_tag else session_id
+    return filesystem_safe_output_path(output_dir, f"{prefix}__{tagged_id}__", title)
 
 
 def export_session(
@@ -713,18 +723,22 @@ def write_manifest(
     records: list[dict[str, Any]],
     changed: int,
     removed: int,
+    source_roots: list[Path] | None = None,
 ) -> None:
     sessions_root = grok_home / "sessions"
+    roots = source_roots or [sessions_root]
     lines = [
         "Local Grok CLI live chat export manifest",
         f"Export directory: {output_dir}",
         f"Last scan: {now_iso()}",
-        f"Source root: {sessions_root}",
+        f"Source root: {roots[0]}",
         f"Chat files tracked: {len(records)}",
         f"Changed this scan: {changed}",
         f"Removed stale outputs this scan: {removed}",
         "",
     ]
+    for extra_root in roots[1:]:
+        lines.insert(4, f"Source root: {extra_root}")
     for number, record in enumerate(sorted(records, key=lambda item: item["output"]), 1):
         counts = record.get("counts", {})
         lines.extend(
@@ -773,7 +787,6 @@ def scan_once(
     include_system: bool,
 ) -> tuple[int, int, int]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    sessions_root = grok_home / "sessions"
     state_path = output_dir / ".export_state.json"
     state_obj = load_json(state_path, {"sources": {}})
     old_sources: dict[str, Any] = state_obj.get("sources", {})
@@ -782,8 +795,14 @@ def scan_once(
     records: list[dict[str, Any]] = []
     changed = 0
 
+    scan_homes: list[tuple[Path, str]] = [(grok_home, "")] + wsl_agent_homes(".grok")
+    source_roots = [scan_home / "sessions" for scan_home, _tag in scan_homes]
+
     # --- full sessions ---
-    for ordinal, session_dir in enumerate(iter_session_dirs(sessions_root), 1):
+    scan_sessions: list[tuple[Path, str]] = []
+    for scan_home, home_tag in scan_homes:
+        scan_sessions.extend((path, home_tag) for path in iter_session_dirs(scan_home / "sessions"))
+    for ordinal, (session_dir, home_tag) in enumerate(scan_sessions, 1):
         chat_path = session_dir / "chat_history.jsonl"
         summary_path = session_dir / "summary.json"
         # Track the larger of chat_history / summary for change detection.
@@ -798,7 +817,14 @@ def scan_once(
         summary_size = summary_path.stat().st_size if summary_path.exists() else 0
         summary = read_summary(session_dir)
         title = title_for_session(session_dir, summary)
-        output_path = output_path_for_session(session_dir, title, output_dir, summary, ordinal)
+        output_path = output_path_for_session(
+            session_dir,
+            title,
+            output_dir,
+            summary,
+            ordinal,
+            home_tag=home_tag,
+        )
         old_record = old_sources.get(source_key, {})
         old_output = old_record.get("output")
         must_export = (
@@ -863,7 +889,12 @@ def scan_once(
         records.append(record)
 
     # --- prompt history files ---
-    for ordinal, hist_path in enumerate(iter_prompt_history_files(sessions_root), 1):
+    scan_histories: list[tuple[Path, str]] = []
+    for scan_home, home_tag in scan_homes:
+        scan_histories.extend(
+            (path, home_tag) for path in iter_prompt_history_files(scan_home / "sessions")
+        )
+    for ordinal, (hist_path, home_tag) in enumerate(scan_histories, 1):
         source_key = str(hist_path)
         seen_sources.add(source_key)
         stat = hist_path.stat()
@@ -875,9 +906,12 @@ def scan_once(
         except (OSError, OverflowError, ValueError):
             prefix = f"{ordinal:03d}"
         sh = source_hash(hist_path)
-        output_path = filesystem_safe_output_path(
-            output_dir, f"{prefix}__history__{sh}__", title
+        history_stem = (
+            f"{prefix}__{home_tag}_history__{sh}__"
+            if home_tag
+            else f"{prefix}__history__{sh}__"
         )
+        output_path = filesystem_safe_output_path(output_dir, history_stem, title)
         old_record = old_sources.get(source_key, {})
         old_output = old_record.get("output")
         must_export = (
@@ -916,19 +950,14 @@ def scan_once(
         new_sources[source_key] = record
         records.append(record)
 
-    removed = 0
-    for source_key, old_record in old_sources.items():
-        if source_key in seen_sources:
-            continue
-        old_output = old_record.get("output")
-        if old_output:
-            try:
-                Path(old_output).unlink()
-                removed += 1
-            except FileNotFoundError:
-                pass
+    removed = prune_removed_sources(
+        old_sources,
+        seen_sources,
+        retained_sources=new_sources,
+        retained_records=records,
+    )
 
-    write_manifest(output_dir, grok_home, records, changed, removed)
+    write_manifest(output_dir, grok_home, records, changed, removed, source_roots)
     atomic_write_json(
         state_path,
         {

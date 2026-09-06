@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -24,6 +25,20 @@ from typing import Any
 _TOOLS_DIR = Path(__file__).resolve().parent
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
+
+# PyInstaller's PySide6 runtime hook does not always register the sibling
+# shiboken6 directory for the 6.11 Python 3.14 wheels. Register both bundled
+# directories before loading QtCore so QtCore.pyd can resolve its DLLs in
+# one-file and one-directory builds.
+if getattr(sys, "frozen", False):
+    _BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", _TOOLS_DIR))
+    for _dll_dir in (_BUNDLE_DIR / "PySide6", _BUNDLE_DIR / "shiboken6"):
+        if _dll_dir.is_dir():
+            try:
+                os.add_dll_directory(str(_dll_dir))
+            except (AttributeError, OSError):
+                pass
+            os.environ["PATH"] = str(_dll_dir) + os.pathsep + os.environ.get("PATH", "")
 
 from PySide6.QtCore import (
     QAbstractTableModel,
@@ -154,6 +169,19 @@ def short_time(value: str | None) -> str:
         return text[:19] if len(text) >= 19 else text
 
 
+def source_location(source: str, source_key: str = "", output: str = "") -> str:
+    """Return a compact visible location label for an exported record."""
+    haystack = " ".join((source_key or "", source or "", output or ""))
+    normalized = haystack.replace("\\", "/")
+    match = re.search(r"//wsl(?:\.localhost|\$)/([^/\\]+)", normalized, re.IGNORECASE)
+    if match:
+        return f"WSL: {match.group(1)}"
+    match = re.search(r"@wsl-([^:/\\]+)", haystack, re.IGNORECASE)
+    if match:
+        return f"WSL: {match.group(1)}"
+    return "Local"
+
+
 _pid_cache: dict[int, tuple[float, bool]] = {}
 
 
@@ -241,6 +269,7 @@ class ExportRow:
     agent_id: str
     agent_name: str
     agent_color: str
+    location: str
     title: str
     kind: str
     session_id: str
@@ -275,7 +304,7 @@ class ExportTableModel(QAbstractTableModel):
         return 0 if parent.isValid() else len(self._rows)
 
     def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: N802
-        return 0 if parent.isValid() else 10
+        return 0 if parent.isValid() else 11
 
     def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.ItemDataRole.DisplayRole):  # noqa: N802
         if role != Qt.ItemDataRole.DisplayRole:
@@ -287,7 +316,7 @@ class ExportTableModel(QAbstractTableModel):
 
     def retranslate(self) -> None:
         # Force header labels to refresh for the new language.
-        self.headerDataChanged.emit(Qt.Orientation.Horizontal, 0, 9)
+        self.headerDataChanged.emit(Qt.Orientation.Horizontal, 0, 10)
 
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):  # noqa: N802
         if not index.isValid():
@@ -297,6 +326,7 @@ class ExportTableModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.DisplayRole:
             return (
                 row.agent_name,
+                row.location,
                 row.title,
                 row.kind,
                 row.session_id,
@@ -309,12 +339,13 @@ class ExportTableModel(QAbstractTableModel):
             )[col]
         if role == Qt.ItemDataRole.ForegroundRole and col == 0:
             return QColor(row.agent_color)
-        if role == Qt.ItemDataRole.TextAlignmentRole and col in (5, 6, 7, 8):
+        if role == Qt.ItemDataRole.TextAlignmentRole and col in (6, 7, 8, 9):
             return int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         if role == Qt.ItemDataRole.UserRole:
             # numeric / raw sort keys
             return (
                 row.agent_name,
+                row.location,
                 row.title,
                 row.kind,
                 row.session_id,
@@ -378,6 +409,7 @@ class ExportFilterProxy(QSortFilterProxyModel):
             [
                 row.agent_name,
                 row.agent_id,
+                row.location,
                 row.title,
                 row.kind,
                 row.session_id,
@@ -671,11 +703,11 @@ class HubWindow(QMainWindow):
         self.table.verticalHeader().setDefaultSectionSize(26)
         self.table.doubleClicked.connect(self.open_selected_export)
         hdr = self.table.horizontalHeader()
-        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        for col in (0, 2, 3, 4, 5, 6, 7, 8, 9):
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        for col in (0, 1, 3, 4, 5, 6, 7, 8, 9, 10):
             hdr.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
         # Sort by Updated desc initially after first load
-        self.table.sortByColumn(9, Qt.SortOrder.DescendingOrder)
+        self.table.sortByColumn(10, Qt.SortOrder.DescendingOrder)
         splitter.addWidget(self.table)
 
         bottom = QWidget()
@@ -919,6 +951,11 @@ class HubWindow(QMainWindow):
                         agent_id=agent.id,
                         agent_name=agent.short,
                         agent_color=agent.color,
+                        location=source_location(
+                            str(rec.get("source") or source_key),
+                            str(source_key),
+                            str(rec.get("output") or ""),
+                        ),
                         title=str(rec.get("title") or "Untitled"),
                         kind=kind,
                         session_id=session_id,

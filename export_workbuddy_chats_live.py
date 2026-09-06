@@ -34,6 +34,7 @@ from chat_export_common import (
     run_watcher_loop,
     scrub_internal_lines,
     should_skip_user_text,
+    wsl_agent_homes,
     write_manifest,
 )
 
@@ -297,82 +298,92 @@ def scan_once(home: Path, output_dir: Path, label: str) -> tuple[int, int, int]:
     seen: set[str] = set()
     changed = 0
 
-    db = home / "workbuddy.db"
-    projects = home / "projects"
-    db_sessions = load_db_sessions(db)
-    jsonl_files = iter_jsonl_files(projects)
+    scan_homes: list[tuple[Path, str]] = [(home, "")]
+    # Mirror the configured Windows home in every reachable WSL distro.
+    try:
+        relative_home = home.relative_to(Path.home()).as_posix()
+    except ValueError:
+        relative_home = ""
+    if relative_home:
+        scan_homes.extend(wsl_agent_homes(relative_home))
 
-    found_ids: set[str] = set()
-    items: list[tuple[str, Path | None, dict[str, Any]]] = []
-    for path in jsonl_files:
-        sid = session_id_from_jsonl(path)
-        found_ids.add(sid)
-        meta = dict(db_sessions.get(sid) or {"id": sid})
-        items.append((sid, path, meta))
-    for sid, meta in db_sessions.items():
-        if sid in found_ids or meta.get("deleted"):
-            continue
-        items.append((sid, None, meta))
+    ordinal = 0
+    for scan_home, home_tag in scan_homes:
+        db = scan_home / "workbuddy.db"
+        projects = scan_home / "projects"
+        db_sessions = load_db_sessions(db)
+        jsonl_files = iter_jsonl_files(projects)
 
-    for ordinal, (sid, path, meta) in enumerate(items, 1):
-        source_key = str(path) if path is not None else f"{home}#session:{sid}"
-        seen.add(source_key)
-        title = meta.get("title") or ""
-        if path is not None and (not title or title.lower() in {"untitled", "new session"}):
-            title = first_user_title(path) or title
-        if not title:
-            title = sid
-        title = one_line(title, 80)
-        prefix = first_iso_timestamp_prefix(meta.get("created"), ordinal)
-        output_path = filesystem_safe_output_path(output_dir, f"{prefix}__{sid}__", title)
-        old = old_sources.get(source_key, {})
-        mtime_ns = size = 0
-        if path is not None:
-            mtime_ns, size = file_fingerprint(path)
-        db_updated = meta.get("updated") or ""
-        must_export = (
-            not old
-            or old.get("mtime_ns") != mtime_ns
-            or old.get("size") != size
-            or old.get("db_updated") != db_updated
-            or old.get("title") != title
-            or old.get("output") != str(output_path)
-            or not Path(old.get("output") or "").exists()
-            or not output_path.exists()
-        )
-        if path is None and not must_export:
-            record = dict(old)
-            record["output"] = str(output_path)
-        elif must_export:
-            export_path = path if path is not None else home / "sessions" / f"{sid}.missing.jsonl"
-            record = export_jsonl(export_path if path is not None else Path(str(export_path)), meta, title, output_path, label)
-            reuse_or_replace_output(old.get("output"), output_path)
-            changed += 1
-        else:
-            record = {
-                "session_id": sid,
-                "source_id": sid,
-                "title": title,
-                "kind": "session",
-                "source": source_key,
-                "output": str(output_path),
-                "created": meta.get("created") or old.get("created", ""),
-                "updated": meta.get("updated") or old.get("updated", ""),
-                "cwd": meta.get("cwd") or old.get("cwd", ""),
-                "model": meta.get("model") or old.get("model", ""),
-                "counts": old.get("counts") or empty_counts(),
-                "bytes": old.get(
-                    "bytes",
-                    output_path.stat().st_size if output_path.exists() else 0,
-                ),
-            }
-        record["mtime_ns"] = mtime_ns
-        record["size"] = size
-        record["db_updated"] = db_updated
-        new_sources[source_key] = record
-        records.append(record)
+        found_ids: set[str] = set()
+        items: list[tuple[str, Path | None, dict[str, Any]]] = []
+        for path in jsonl_files:
+            sid = session_id_from_jsonl(path)
+            found_ids.add(sid)
+            meta = dict(db_sessions.get(sid) or {"id": sid})
+            items.append((sid, path, meta))
+        for sid, meta in db_sessions.items():
+            if sid in found_ids or meta.get("deleted"):
+                continue
+            items.append((sid, None, meta))
 
-    removed = prune_removed_sources(old_sources, seen)
+        for sid, path, meta in items:
+            ordinal += 1
+            source_key = str(path) if path is not None else f"{scan_home}#session:{sid}"
+            seen.add(source_key)
+            title = meta.get("title") or ""
+            if path is not None and (not title or title.lower() in {"untitled", "new session"}):
+                title = first_user_title(path) or title
+            if not title:
+                title = sid
+            title = one_line(title, 80)
+            prefix = first_iso_timestamp_prefix(meta.get("created"), ordinal)
+            stem = f"{prefix}__{sid}__" if not home_tag else f"{prefix}__{home_tag}_{sid}__"
+            output_path = filesystem_safe_output_path(output_dir, stem, title)
+            old = old_sources.get(source_key, {})
+            mtime_ns = size = 0
+            if path is not None:
+                mtime_ns, size = file_fingerprint(path)
+            db_updated = meta.get("updated") or ""
+            must_export = (
+                not old
+                or old.get("mtime_ns") != mtime_ns
+                or old.get("size") != size
+                or old.get("db_updated") != db_updated
+                or old.get("title") != title
+                or old.get("output") != str(output_path)
+                or not Path(old.get("output") or "").exists()
+                or not output_path.exists()
+            )
+            if path is None and not must_export:
+                record = dict(old)
+                record["output"] = str(output_path)
+            elif must_export:
+                export_path = path if path is not None else scan_home / "sessions" / f"{sid}.missing.jsonl"
+                record = export_jsonl(export_path, meta, title, output_path, label)
+                reuse_or_replace_output(old.get("output"), output_path)
+                changed += 1
+            else:
+                record = {
+                    "session_id": sid,
+                    "source_id": sid,
+                    "title": title,
+                    "kind": "session",
+                    "source": source_key,
+                    "output": str(output_path),
+                    "created": meta.get("created") or old.get("created", ""),
+                    "updated": meta.get("updated") or old.get("updated", ""),
+                    "cwd": meta.get("cwd") or old.get("cwd", ""),
+                    "model": meta.get("model") or old.get("model", ""),
+                    "counts": old.get("counts") or empty_counts(),
+                    "bytes": old.get("bytes", output_path.stat().st_size if output_path.exists() else 0),
+                }
+            record["mtime_ns"] = mtime_ns
+            record["size"] = size
+            record["db_updated"] = db_updated
+            new_sources[source_key] = record
+            records.append(record)
+
+    removed = prune_removed_sources(old_sources, seen, retained_sources=new_sources, retained_records=records)
     write_manifest(output_dir, f"{label} {home}", records, changed, removed)
     atomic_write_json(
         state_path,

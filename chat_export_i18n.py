@@ -97,6 +97,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "zh": "{shown} / {total} 条导出",
     },
     "col_agent": {"en": "Agent", "zh": "代理"},
+    "col_location": {"en": "Location", "zh": "位置"},
     "col_title": {"en": "Title", "zh": "标题"},
     "col_kind": {"en": "Kind", "zh": "类型"},
     "col_session": {"en": "Session ID", "zh": "会话 ID"},
@@ -222,6 +223,7 @@ class I18n:
     def columns(self) -> tuple[str, ...]:
         return (
             self.t("col_agent"),
+            self.t("col_location"),
             self.t("col_title"),
             self.t("col_kind"),
             self.t("col_session"),

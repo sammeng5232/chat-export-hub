@@ -925,7 +925,7 @@ def scan_once(
         new_sources[source_key] = record
         records.append(record)
 
-    removed = prune_removed_sources(old_sources, seen)
+    removed = prune_removed_sources(old_sources, seen, retained_sources=new_sources, retained_records=records)
     write_manifest(output_dir, f"{label} {','.join(products)}", records, changed, removed)
     atomic_write_json(
         state_path,

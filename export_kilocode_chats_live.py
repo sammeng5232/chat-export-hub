@@ -46,6 +46,7 @@ from export_opencode_chats_live import (
     load_sessions as _db_load_sessions,
     session_title as _db_session_title,
 )
+from chat_export_common import stage_wsl_sqlite, wsl_agent_homes
 
 HOST_GLOBAL = (
     Path(os.environ.get("APPDATA", "")) / "Code" / "User" / "globalStorage",
@@ -63,21 +64,34 @@ TASK_FILES = (
 )
 
 
-def kilo_db_paths() -> list[Path]:
+def kilo_db_sources() -> list[tuple[Path, str, Path]]:
+    """(db_path, tag, display_path) for kilo.db on Windows and in every WSL distro.
+
+    Windows keeps tag "" (existing source keys stay stable); WSL databases are
+    staged locally (WAL dbs cannot be read through the 9P share) and tagged
+    like "@wsl-Ubuntu".
+    """
+    out: list[tuple[Path, str, Path]] = []
+    seen: set[str] = set()
     candidates: list[Path] = []
     data_home = os.environ.get("XDG_DATA_HOME")
     if data_home:
         candidates.append(Path(data_home) / "kilo" / "kilo.db")
     candidates.append(Path.home() / ".local" / "share" / "kilo" / "kilo.db")
-    seen: set[str] = set()
-    out: list[Path] = []
     for path in candidates:
         key = str(path).lower()
         if key in seen:
             continue
         seen.add(key)
         if path.exists():
-            out.append(path)
+            out.append((path, "", path))
+    for wsl_dir, tag in wsl_agent_homes(".local/share/kilo"):
+        unc_db = wsl_dir / "kilo.db"
+        if not unc_db.exists():
+            continue
+        staged = stage_wsl_sqlite(unc_db)
+        if staged is not None:
+            out.append((staged, f"@{tag}", unc_db))
     return out
 
 
@@ -357,19 +371,22 @@ def scan_once(output_dir: Path) -> tuple[int, int, int]:
             new_sources[source_key] = record
             records.append(record)
 
-    for db in kilo_db_paths():
+    for db, db_tag, db_display in kilo_db_sources():
         con = _db_connect_ro(db)
         try:
             db_sessions = _db_load_sessions(con)
             for ordinal, session in enumerate(db_sessions, 1):
-                session["source_db"] = str(db)
-                source_key = f"kilo-cli:{session['id']}"
+                session["source_db"] = str(db_display)
+                source_key = f"kilo-cli{db_tag}:{session['id']}"
                 seen.add(source_key)
                 title = _db_session_title(con, session)
                 prefix = first_iso_timestamp_prefix(session.get("created"), ordinal)
-                output_path = filesystem_safe_output_path(
-                    output_dir, f"{prefix}__{session['id']}__", title
+                stem = (
+                    f"{prefix}__{session['id']}__"
+                    if not db_tag
+                    else f"{prefix}__{db_tag}_{session['id']}__"
                 )
+                output_path = filesystem_safe_output_path(output_dir, stem, title)
                 old = old_sources.get(source_key, {})
                 must_export = (
                     not old
@@ -396,7 +413,7 @@ def scan_once(output_dir: Path) -> tuple[int, int, int]:
                         "source_id": session["id"],
                         "title": title,
                         "kind": "session",
-                        "source": f"{db}#session:{session['id']}",
+                        "source": f"{db_display}#session:{session['id']}",
                         "output": str(output_path),
                         "created": session.get("created") or old.get("created", ""),
                         "updated": session.get("updated") or old.get("updated", ""),
@@ -415,14 +432,14 @@ def scan_once(output_dir: Path) -> tuple[int, int, int]:
         finally:
             con.close()
 
-    removed = prune_removed_sources(old_sources, seen)
+    removed = prune_removed_sources(old_sources, seen, retained_sources=new_sources, retained_records=records)
     write_manifest(output_dir, "Kilo Code", records, changed, removed)
     atomic_write_json(
         state_path,
         {
             "updated_at": now_iso(),
             "roots": [str(p) for p in kilo_roots()],
-            "dbs": [str(p) for p in kilo_db_paths()],
+            "dbs": [str(display) for _db, _tag, display in kilo_db_sources()],
             "sources": new_sources,
         },
     )

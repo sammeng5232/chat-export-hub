@@ -35,6 +35,8 @@ from chat_export_common import (
     run_watcher_loop,
     scrub_internal_lines,
     should_skip_user_text,
+    stage_wsl_sqlite,
+    wsl_agent_homes,
     write_manifest,
 )
 
@@ -60,53 +62,75 @@ def pretty(value: Any) -> str:
         return str(value)
 
 
-def session_files() -> list[Path]:
+def session_files() -> list[tuple[Path, str]]:
     home = Path.home()
     appdata = Path(os.environ.get("APPDATA", ""))
-    roots = [
-        home / ".kiro" / "sessions",
-        home / ".kiro" / "chats",
-        appdata / "Kiro" / "User" / "globalStorage" / "kiro.kiroagent",
+    roots: list[tuple[Path, str]] = [
+        (home / ".kiro" / "sessions", ""),
+        (home / ".kiro" / "chats", ""),
+        (appdata / "Kiro" / "User" / "globalStorage" / "kiro.kiroagent", ""),
     ]
-    found: list[Path] = []
-    for root in roots:
+    # Kiro CLI/agent stores are also commonly present in WSL user homes.
+    for wsl_root, tag in wsl_agent_homes(".kiro"):
+        roots.extend(((wsl_root / "sessions", tag), (wsl_root / "chats", tag)))
+    for wsl_root, tag in wsl_agent_homes(".config/Kiro/User/globalStorage/kiro.kiroagent"):
+        roots.append((wsl_root, tag))
+
+    found: list[tuple[Path, str]] = []
+    for root, tag in roots:
         if not root.exists():
             continue
         for path in root.rglob("*"):
             if not path.is_file():
                 continue
             if path.suffix.lower() in {".json", ".jsonl", ".md"} and path.stat().st_size > 2:
-                found.append(path)
+                found.append((path, tag))
     return found
 
 
-def vscdb_chat_entries() -> list[tuple[str, Any, Path]]:
+def vscdb_sources() -> list[tuple[Path, str, Path]]:
     appdata = Path(os.environ.get("APPDATA", ""))
+    out: list[tuple[Path, str, Path]] = []
     db = appdata / "Kiro" / "User" / "globalStorage" / "state.vscdb"
-    if not db.exists():
-        return []
-    try:
-        con = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
-        rows = con.execute("SELECT key, value FROM ItemTable").fetchall()
-        con.close()
-    except sqlite3.Error:
-        return []
-    out: list[tuple[str, Any, Path]] = []
-    for key, value in rows:
-        low = str(key).lower()
-        if not any(tok in low for tok in ("chat", "kiro", "session", "agent", "conversation")):
+    if db.exists():
+        out.append((db, "", db))
+    for wsl_root, tag in wsl_agent_homes(".config/Kiro/User/globalStorage"):
+        unc_db = wsl_root / "state.vscdb"
+        if not unc_db.exists():
             continue
-        raw = value
-        if isinstance(raw, (bytes, bytearray)):
-            try:
-                raw = raw.decode("utf-8")
-            except UnicodeDecodeError:
-                continue
+        staged = stage_wsl_sqlite(unc_db)
+        if staged is not None:
+            out.append((staged, tag, unc_db))
+    return out
+
+
+def vscdb_chat_entries() -> list[tuple[str, Any, Path, str, Path]]:
+    """Read Kiro state stores, retaining WSL tag and display source path."""
+    out: list[tuple[str, Any, Path, str, Path]] = []
+    for db, tag, display_db in vscdb_sources():
+        if not db.exists():
+            continue
         try:
-            payload = json.loads(raw) if isinstance(raw, str) else raw
-        except (TypeError, json.JSONDecodeError):
+            con = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
+            rows = con.execute("SELECT key, value FROM ItemTable").fetchall()
+            con.close()
+        except sqlite3.Error:
             continue
-        out.append((str(key), payload, db))
+        for key, value in rows:
+            low = str(key).lower()
+            if not any(tok in low for tok in ("chat", "kiro", "session", "agent", "conversation")):
+                continue
+            raw = value
+            if isinstance(raw, (bytes, bytearray)):
+                try:
+                    raw = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+            try:
+                payload = json.loads(raw) if isinstance(raw, str) else raw
+            except (TypeError, json.JSONDecodeError):
+                continue
+            out.append((str(key), payload, db, tag, display_db))
     return out
 
 
@@ -194,7 +218,7 @@ def scan_once(output_dir: Path) -> tuple[int, int, int]:
     changed = 0
     ordinal = 0
 
-    for path in session_files():
+    for path, home_tag in session_files():
         if path.name in {".export_state.json"}:
             continue
         ordinal += 1
@@ -204,7 +228,12 @@ def scan_once(output_dir: Path) -> tuple[int, int, int]:
         session_id = path.stem
         title = one_line(f"Kiro {session_id}", 80)
         prefix = first_iso_timestamp_prefix(None, ordinal)
-        output_path = filesystem_safe_output_path(output_dir, f"{prefix}__{session_id}__", title)
+        stem = (
+            f"{prefix}__{session_id}__"
+            if not home_tag
+            else f"{prefix}__{home_tag}_{session_id}__"
+        )
+        output_path = filesystem_safe_output_path(output_dir, stem, title)
         old = old_sources.get(source_key, {})
         must_export = (
             not old
@@ -269,7 +298,7 @@ def scan_once(output_dir: Path) -> tuple[int, int, int]:
         "telemetry",
         "memento",
     )
-    for key, payload, db in vscdb_chat_entries():
+    for key, payload, db, home_tag, display_db in vscdb_chat_entries():
         low_key = key.lower()
         if any(tok in low_key for tok in skip_key_needles):
             continue
@@ -283,13 +312,18 @@ def scan_once(output_dir: Path) -> tuple[int, int, int]:
             for k in ("messages", "entries", "items", "history", "sessions", "conversations")
         ):
             continue
-        source_key = f"{db}#{key}"
+        source_key = f"{display_db}#{key}"
         seen.add(source_key)
         ordinal += 1
         session_id = key.replace("/", "_")[-80:]
         title = one_line(f"Kiro store {key}", 80)
         prefix = first_iso_timestamp_prefix(None, ordinal)
-        output_path = filesystem_safe_output_path(output_dir, f"{prefix}__{session_id}__", title)
+        stem = (
+            f"{prefix}__{session_id}__"
+            if not home_tag
+            else f"{prefix}__{home_tag}_{session_id}__"
+        )
+        output_path = filesystem_safe_output_path(output_dir, stem, title)
         old = old_sources.get(source_key, {})
         fp = file_fingerprint(db)
         must_export = (
@@ -308,7 +342,7 @@ def scan_once(output_dir: Path) -> tuple[int, int, int]:
         new_sources[source_key] = record
         records.append(record)
 
-    removed = prune_removed_sources(old_sources, seen)
+    removed = prune_removed_sources(old_sources, seen, retained_sources=new_sources, retained_records=records)
     write_manifest(output_dir, "Kiro", records, changed, removed)
     atomic_write_json(state_path, {"updated_at": now_iso(), "sources": new_sources})
     return len(records), changed, removed

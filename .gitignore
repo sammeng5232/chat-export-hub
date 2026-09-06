@@ -5,6 +5,12 @@ __pycache__/
 *.exe
 *.spec.bak
 
+# Local verification build variants
+build_*/
+dist_*/
+spec_*/
+ChatExportHubLauncher.cs
+
 # Code-signing certificates (never commit)
 certs/
 *.pfx

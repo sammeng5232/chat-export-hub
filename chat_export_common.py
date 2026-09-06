@@ -7,6 +7,9 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import sqlite3
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -383,15 +386,47 @@ def write_manifest(
     atomic_write_text(output_dir / "MANIFEST.txt", "\n".join(lines))
 
 
+def is_wsl_source_record(source_key: str, record: dict[str, Any] | None = None) -> bool:
+    """Return whether provenance identifies a WSL source (never by output title)."""
+    values = [str(source_key)]
+    if record:
+        for field in ("source", "source_db", "session_dir"):
+            value = record.get(field)
+            if value:
+                values.append(str(value))
+    for value in values:
+        normalized = value.replace("\\", "/").lower()
+        if normalized.startswith(("//wsl.localhost/", "//wsl$/")):
+            return True
+        if "@wsl-" in normalized:
+            return True
+    return False
+
+
 def prune_removed_sources(
     old_sources: dict[str, Any],
     seen_sources: set[str],
+    *,
+    retained_sources: dict[str, Any] | None = None,
+    retained_records: list[dict[str, Any]] | None = None,
 ) -> int:
+    """Prune disappeared Windows sources while retaining reachable WSL exports.
+
+    A WSL source is retained in both output collections only while its existing
+    TXT still exists. This makes a temporary WSL/UNC outage non-destructive;
+    a later scan seeing the source reconciles the record normally.
+    """
     removed = 0
     for source_key, old_record in old_sources.items():
         if source_key in seen_sources:
             continue
         old_output = old_record.get("output")
+        if is_wsl_source_record(source_key, old_record) and old_output and Path(old_output).exists():
+            if retained_sources is not None:
+                retained_sources[source_key] = old_record
+            if retained_records is not None:
+                retained_records.append(old_record)
+            continue
         if old_output:
             try:
                 Path(old_output).unlink()
@@ -441,6 +476,12 @@ def run_watcher_loop(
             **extra_status,
         }
         try:
+            status["wsl_distros"] = wsl_distro_names()
+            status["wsl_homes"] = [str(home) for home, _tag in wsl_user_homes()]
+        except Exception:
+            status["wsl_distros"] = []
+            status["wsl_homes"] = []
+        try:
             write_runtime_status(status_file, status)
             total, changed, removed = scan_fn()
             scan_finished_at = now_iso()
@@ -487,3 +528,184 @@ def run_watcher_loop(
         if once:
             return 0
         time.sleep(max(interval, 1.0))
+
+
+# ---------------------------------------------------------------------------
+# WSL support: discover agent data inside every registered WSL distro and
+# expose it to the Windows-side exporters via \\wsl.localhost UNC paths.
+# Works for any distro registered at scan time, so future WSL installs are
+# picked up automatically.
+# ---------------------------------------------------------------------------
+
+_WSL_UNC_PREFIXES = ("//wsl.localhost/", "//wsl$/")
+
+
+def wsl_distro_names() -> list[str]:
+    """Names of every WSL distribution registered for the current user."""
+    names: list[str] = []
+    override = os.environ.get("CHAT_EXPORT_WSL_DISTROS", "")
+    if override.strip():
+        names.extend(x.strip() for x in override.split(",") if x.strip())
+    try:
+        import winreg
+    except ImportError:
+        return names
+    try:
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Lxss"
+        )
+    except OSError:
+        key = None
+    if key is not None:
+        index = 0
+        while True:
+            try:
+                sub = winreg.EnumKey(key, index)
+                index += 1
+            except OSError:
+                break
+            try:
+                with winreg.OpenKey(key, sub) as sk:
+                    name = winreg.QueryValueEx(sk, "DistributionName")[0]
+                if isinstance(name, str) and name.strip():
+                    names.append(name.strip())
+            except OSError:
+                continue
+    # Store-version WSL can expose the distro through the service while the
+    # per-user registry view is unavailable to a watcher process. Fall back
+    # to the documented list command and tolerate its UTF-16 console output.
+    if not names and os.name == "nt":
+        try:
+            raw = subprocess.check_output(
+                ["wsl.exe", "-l", "-q"], stderr=subprocess.DEVNULL, timeout=5
+            )
+            text = raw.decode("utf-16", errors="ignore")
+            if "\x00" in text:
+                text = raw.decode("utf-16-le", errors="ignore")
+            for line in text.splitlines():
+                name = line.replace("\x00", "").strip().lstrip("* ")
+                if name and name.lower() not in {"windows subsystem for linux distributions:"}:
+                    names.append(name)
+        except (OSError, subprocess.SubprocessError, UnicodeError):
+            pass
+    return list(dict.fromkeys(names))
+
+
+def wsl_user_homes() -> list[tuple[Path, str]]:
+    """(home_path, tag) for each user home directory in every WSL distro.
+
+    Returns UNC paths like ``\\\\wsl.localhost\\Ubuntu\\home\\mengz`` plus a
+    stable tag like ``wsl-Ubuntu`` used for source keys / file names. Distros
+    that are not running (or not reachable) are skipped silently.
+    """
+    out: list[tuple[Path, str]] = []
+    users_override = [x.strip() for x in os.environ.get("CHAT_EXPORT_WSL_USERS", "").split(",") if x.strip()]
+    for distro in wsl_distro_names():
+        home_root = Path(rf"\\wsl.localhost\{distro}") / "home"
+        try:
+            users = (
+                [home_root / user for user in users_override]
+                if users_override
+                else sorted(p for p in home_root.iterdir() if p.is_dir())
+            )
+        except OSError:
+            continue
+        for user_dir in users:
+            try:
+                if user_dir.is_dir():
+                    out.append((user_dir, f"wsl-{distro}"))
+            except OSError:
+                continue
+    return out
+
+
+def wsl_agent_homes(relative: str) -> list[tuple[Path, str]]:
+    """Existing ``<relative>`` agent directories across all WSL distros.
+
+    ``relative`` is a POSIX-style path relative to a WSL user home, e.g.
+    ``.claude`` or ``.local/share/kilo``. Returns ``(dir, tag)`` pairs.
+    """
+    rel = relative.replace("/", os.sep) if os.sep != "/" else relative
+    out: list[tuple[Path, str]] = []
+    for home, tag in wsl_user_homes():
+        candidate = home / rel
+        try:
+            if candidate.is_dir():
+                out.append((candidate, tag))
+        except OSError:
+            continue
+    return out
+
+
+def wsl_tag_for_path(path: Path) -> str:
+    """Derive the WSL tag for a UNC path, or '' for non-WSL paths."""
+    text = str(path).replace("\\", "/").lower()
+    for prefix in _WSL_UNC_PREFIXES:
+        if text.startswith(prefix):
+            rest = str(path).replace("\\", "/")[len(prefix):]
+            distro = rest.split("/", 1)[0]
+            return f"wsl-{distro}"
+    return ""
+
+
+def stage_wsl_sqlite(unc_db: Path) -> Path | None:
+    """Copy a WSL SQLite database to a local staging dir when it changed.
+
+    WAL-mode databases cannot be opened read-only through the WSL 9P share,
+    so exporters read a local copy instead. The db plus its ``-wal`` file are
+    copied only when their (mtime, size) fingerprint changes; the wal is then
+    checkpointed into the copy so it can be opened ``mode=ro``. Returns the
+    staged path, or None when the source is unreachable.
+    """
+    tag_dir = source_hash(str(unc_db))
+    staging_root = (
+        Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
+        / "ChatExportHub"
+        / "staging"
+        / tag_dir
+    )
+    staged_db = staging_root / unc_db.name
+    marker_path = staging_root / "staging.json"
+
+    try:
+        fp = file_fingerprint(unc_db)
+        wal = Path(str(unc_db) + "-wal")
+        wal_fp = file_fingerprint(wal) if wal.exists() else (0, 0)
+    except OSError:
+        return None
+
+    marker: dict[str, Any] = {}
+    if marker_path.is_file():
+        try:
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            marker = {}
+    if (
+        staged_db.is_file()
+        and marker.get("db") == list(fp)
+        and marker.get("wal") == list(wal_fp)
+    ):
+        return staged_db
+
+    try:
+        staging_root.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(unc_db, staged_db)
+        staged_wal = Path(str(staged_db) + "-wal")
+        if wal_fp != (0, 0) and wal.is_file():
+            shutil.copyfile(wal, staged_wal)
+        elif staged_wal.exists():
+            staged_wal.unlink()
+        if staged_wal.exists():
+            # Fold the WAL into the main db so mode=ro readers can open it.
+            con = sqlite3.connect(staged_db)
+            try:
+                con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            finally:
+                con.close()
+            staged_wal.unlink(missing_ok=True)
+        marker_path.write_text(
+            json.dumps({"db": list(fp), "wal": list(wal_fp)}), encoding="utf-8"
+        )
+        return staged_db
+    except OSError:
+        return None
