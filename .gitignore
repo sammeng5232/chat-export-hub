@@ -3,6 +3,7 @@ build/
 dist/
 __pycache__/
 *.exe
+!ChatExportHub.exe
 *.spec.bak
 
 # Local verification build variants
