@@ -189,6 +189,7 @@ AGENT_NAMES: dict[str, dict[str, str]] = {
     "workbuddy-cn": {"en": "WorkBuddy CN", "zh": "WorkBuddy CN"},
     "trae": {"en": "Trae", "zh": "Trae"},
     "trae-cn": {"en": "Trae CN", "zh": "Trae CN"},
+    "qwencode": {"en": "Qwen Code", "zh": "Qwen Code"},
 }
 
 

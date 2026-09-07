@@ -769,6 +769,7 @@ VBOX_PULL_RELPATHS = [
     ".cline",
     ".continue",
     ".pi",
+    ".qwen/projects",
     "AppData/Roaming/TRAE SOLO",
     "AppData/Roaming/TRAE SOLO CN",
 ]

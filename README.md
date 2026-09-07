@@ -24,6 +24,7 @@ Unified desktop app for **live chat history exports** across multiple AI agents.
 | Cline CLI | `~/cline_chat_live_exports` | `~/.cline/data/sessions` (Cline Chat Export Watcher) |
 | Continue | `~/continue_chat_live_exports` | `~/.continue/sessions` (Continue Chat Export Watcher) |
 | Pi Agent | `~/pi_chat_live_exports` | `~/.pi/agent/sessions` (Pi Chat Export Watcher) |
+| Qwen Code | `~/qwen_chat_live_exports` | `~/.qwen/projects/<cwd>/chats` (Qwen Code Chat Export Watcher) |
 
 ## Watcher tasks
 
@@ -38,6 +39,7 @@ Scheduled tasks keep exports live (logon trigger + 5-minute revival, 30s scan in
 | Cline Chat Export Watcher | `install_cline_chat_export_task.ps1` |
 | Continue Chat Export Watcher | `install_continue_chat_export_task.ps1` |
 | Pi Chat Export Watcher | `install_pi_chat_export_task.ps1` |
+| Qwen Code Chat Export Watcher | `install_qwen_chat_export_task.ps1` |
 
 Agents without a watcher task export only when triggered from the hub UI.
 
@@ -56,11 +58,16 @@ merges the results into the same export folders:
   the staging lock keeps the many watcher processes from pulling the same VM
   twice. No VM passwords are stored anywhere. Tags: `vbox-<vm>`.
   Works for Windows and Linux guests; the guest profile resolves via `whoami`.
-- **Remote SSH machines** (e.g. `cuhkecon` = scrp-login.econ.cuhk.edu.hk) —
+- **Remote SSH machines** (e.g. `scrp` = scrp-login.econ.cuhk.edu.hk) —
   aliases listed in `chat_export_remote_hosts.json` (beside the exporters;
   git-ignored) or `CHAT_EXPORT_REMOTE_HOSTS`. Each alias needs a key-auth
   `Host` entry in `~/.ssh/config`. Sync every 15 min (compressed tar) with a
   10-minute failure backoff. Tags: `ssh-<alias>`.
+  - SCRP note: `scrp`, `scrp1` and `scrp2` are login nodes that share one
+    home filesystem, so the single `scrp` alias covers histories from all
+    three; extra aliases would only duplicate every export. SCRP is reachable
+    only from the CUHK network / VPN — the outage-safe retention keeps
+    existing exports while off-campus and resumes syncing automatically.
 
 Remote sessions carry a `@wsl-…` / `@vbox-…` / `@ssh-…` marker in their source
 keys (and usually in the file name), show a **WSL: … / VM: … / SSH: …** label
@@ -119,6 +126,7 @@ No UI code changes required for simple agents that share the same state layout.
 - `export_cline_chats_live.py` — Cline CLI
 - `export_continue_chats_live.py` — Continue extension
 - `export_pi_chats_live.py` — pi agent
+- `export_qwen_chats_live.py` — Qwen Code CLI
 - `grok_export_monitor.py` — Grok export monitor
 - `install_*_chat_export_task.ps1` — scheduled watcher installers
 - `build_chat_export_hub.ps1` — PyInstaller build + sign + shortcuts

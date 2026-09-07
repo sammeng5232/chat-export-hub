@@ -74,6 +74,7 @@ TRAE_EXPORTER = TOOLS / "export_trae_chats_live.py"
 CLINE_EXPORTER = TOOLS / "export_cline_chats_live.py"
 CONTINUE_EXPORTER = TOOLS / "export_continue_chats_live.py"
 PI_EXPORTER = TOOLS / "export_pi_chats_live.py"
+QWEN_EXPORTER = TOOLS / "export_qwen_chats_live.py"
 # Shared watcher status for the combined Codex+Claude scheduled task
 CODEX_CLAUDE_STATUS = HOME / "codex_chat_live_exports" / "watcher.status.json"
 CODEX_CLAUDE_LOG = HOME / "codex_chat_live_exports" / "watcher.log"
@@ -300,6 +301,19 @@ AGENTS: list[AgentSpec] = [
         task_name="Pi Chat Export Watcher",
         layout="generic",
         notes="pi agent sessions under ~/.pi/agent/sessions",
+    ),
+    AgentSpec(
+        id="qwencode",
+        name="Qwen Code",
+        short="Qwen",
+        color="#6366f1",
+        output_dir=HOME / "qwen_chat_live_exports",
+        source_home=HOME / ".qwen",
+        exporter=QWEN_EXPORTER,
+        export_args=("--once",),
+        task_name="Qwen Code Chat Export Watcher",
+        layout="generic",
+        notes="Qwen Code sessions under ~/.qwen/projects/<cwd>/chats",
     ),
 ]
 
