@@ -65,6 +65,7 @@ class AgentSpec:
 
 TOOLS = HOME / ".grok" / "tools"
 CODEX_CLAUDE_EXPORTER = HOME / ".codex" / "tools" / "export_codex_claude_chats_live.py"
+CLAUDE_SPLITTER = TOOLS / "split_claude_code_exports.py"
 GROK_EXPORTER = TOOLS / "export_grok_chats_live.py"
 OPENCODE_EXPORTER = TOOLS / "export_opencode_chats_live.py"
 WORKBUDDY_EXPORTER = TOOLS / "export_workbuddy_chats_live.py"
@@ -78,6 +79,9 @@ QWEN_EXPORTER = TOOLS / "export_qwen_chats_live.py"
 # Shared watcher status for the combined Codex+Claude scheduled task
 CODEX_CLAUDE_STATUS = HOME / "codex_chat_live_exports" / "watcher.status.json"
 CODEX_CLAUDE_LOG = HOME / "codex_chat_live_exports" / "watcher.log"
+# Splitter task status/log (feeds the Claude Code CLI / GUI derived states)
+CLAUDE_SPLIT_STATUS = HOME / "claude_code_chat_live_exports" / "watcher.status.json"
+CLAUDE_SPLIT_LOG = HOME / "claude_code_chat_live_exports" / "watcher.log"
 
 
 AGENTS: list[AgentSpec] = [
@@ -105,26 +109,54 @@ AGENTS: list[AgentSpec] = [
     ),
     AgentSpec(
         id="claude",
-        name="Claude Code",
-        short="Claude",
+        name="Claude Code CLI",
+        short="Claude CLI",
         color="#d97706",
         output_dir=HOME / "claude_code_chat_live_exports",
         source_home=HOME / ".claude",
-        # Same background watcher as Codex (combined exporter)
-        status_path=CODEX_CLAUDE_STATUS,
-        log_path=CODEX_CLAUDE_LOG,
-        exporter=CODEX_CLAUDE_EXPORTER,
+        # Derived by the splitter from the combined exporter's raw state:
+        # terminal (cli / sdk-cli) + VS Code extension (claude-vscode) sessions
+        # plus the prompt history. Desktop-app sessions live in the GUI agent.
+        state_name=".export_state.cli.json",
+        status_path=CLAUDE_SPLIT_STATUS,
+        log_path=CLAUDE_SPLIT_LOG,
+        exporter=CLAUDE_SPLITTER,
         export_args=(
-            "--claude-home",
-            str(HOME / ".claude"),
-            "--claude-output-dir",
-            str(HOME / "claude_code_chat_live_exports"),
-            "--no-codex",
+            "--role",
+            "cli",
             "--once",
         ),
-        task_name="Codex Claude Chat Export Watcher",
+        task_name="Claude Code Chat Export Splitter",
         layout="claude",
-        notes="Project chats, subagents, journals under ~/.claude/projects",
+        notes=(
+            "Terminal + VS Code sessions under ~/.claude/projects "
+            "(entrypoint cli / sdk-cli / claude-vscode) plus prompt history; "
+            "raw exports come from the combined Codex+Claude watcher, the "
+            "splitter task derives this agent's state"
+        ),
+    ),
+    AgentSpec(
+        id="claude-gui",
+        name="Claude Code GUI",
+        short="Claude GUI",
+        color="#d97757",
+        output_dir=HOME / "claude_code_gui_chat_live_exports",
+        source_home=HOME / ".claude",
+        status_path=CLAUDE_SPLIT_STATUS,
+        log_path=CLAUDE_SPLIT_LOG,
+        exporter=CLAUDE_SPLITTER,
+        export_args=(
+            "--role",
+            "gui",
+            "--once",
+        ),
+        task_name="Claude Code Chat Export Splitter",
+        layout="claude",
+        notes=(
+            "Claude desktop app sessions under ~/.claude/projects "
+            "(entrypoint claude-desktop), copied into their own export "
+            "folder by the splitter task"
+        ),
     ),
     AgentSpec(
         id="grok",

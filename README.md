@@ -12,7 +12,8 @@ Unified desktop app for **live chat history exports** across multiple AI agents.
 | Agent | Export folder | Source |
 |-------|---------------|--------|
 | OpenAI Codex | `~/codex_chat_live_exports` | `~/.codex` (Codex Claude Chat Export Watcher) |
-| Claude Code | `~/claude_code_chat_live_exports` | `~/.claude` (same combined task) |
+| Claude Code CLI | `~/claude_code_chat_live_exports` | `~/.claude` terminal + VS Code sessions (combined task + Claude Code Chat Export Splitter) |
+| Claude Code GUI | `~/claude_code_gui_chat_live_exports` | `~/.claude` desktop-app sessions, entrypoint `claude-desktop` (Claude Code Chat Export Splitter) |
 | Grok CLI | `~/grok_chat_live_exports` | `~/.grok` (Grok Chat Export Watcher) |
 | OpenCode | `~/opencode_chat_live_exports` | `~/.local/share/opencode/opencode.db` — CLI + desktop (OpenCode Chat Export Watcher) |
 | Kilo Code | `~/kilocode_chat_live_exports` | `~/.local/share/kilo/kilo.db` (Kilo CLI) + VS Code / Cursor `kilocode.kilo-code` globalStorage (Kilo Code Chat Export Watcher) |
@@ -33,6 +34,7 @@ Scheduled tasks keep exports live (logon trigger + 5-minute revival, 30s scan in
 | Task name | Installer |
 |-----------|------------|
 | Codex Claude Chat Export Watcher | `~/.codex/tools/install_chat_export_task.ps1` |
+| Claude Code Chat Export Splitter | `install_claude_code_split_task.ps1` (derives the Claude Code CLI / GUI states from the combined exporter's output every 15s) |
 | Grok Chat Export Watcher | `install_grok_chat_export_task.ps1` |
 | OpenCode Chat Export Watcher | `install_opencode_chat_export_task.ps1` |
 | Kilo Code Chat Export Watcher | `install_kilo_chat_export_task.ps1` |
@@ -127,6 +129,7 @@ No UI code changes required for simple agents that share the same state layout.
 - `export_continue_chats_live.py` — Continue extension
 - `export_pi_chats_live.py` — pi agent
 - `export_qwen_chats_live.py` — Qwen Code CLI
+- `split_claude_code_exports.py` — Claude Code CLI / GUI splitter (post-processes the combined exporter's output by session entrypoint: `cli` / `sdk-cli` / `claude-vscode` stay CLI, `claude-desktop` becomes GUI)
 - `grok_export_monitor.py` — Grok export monitor
 - `install_*_chat_export_task.ps1` — scheduled watcher installers
 - `build_chat_export_hub.ps1` — PyInstaller build + sign + shortcuts

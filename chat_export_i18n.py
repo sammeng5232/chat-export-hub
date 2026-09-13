@@ -180,7 +180,8 @@ STRINGS: dict[str, dict[str, str]] = {
 # Agent display names (optional overrides; short stays technical)
 AGENT_NAMES: dict[str, dict[str, str]] = {
     "codex": {"en": "OpenAI Codex", "zh": "OpenAI Codex"},
-    "claude": {"en": "Claude Code", "zh": "Claude Code"},
+    "claude": {"en": "Claude Code CLI", "zh": "Claude Code CLI"},
+    "claude-gui": {"en": "Claude Code GUI", "zh": "Claude Code GUI"},
     "grok": {"en": "Grok CLI", "zh": "Grok CLI"},
     "opencode": {"en": "OpenCode", "zh": "OpenCode"},
     "kilocode": {"en": "Kilo Code", "zh": "Kilo Code"},
