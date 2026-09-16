@@ -770,8 +770,26 @@ VBOX_PULL_RELPATHS = [
     ".continue",
     ".pi",
     ".qwen/projects",
+    ".cursor/chats",
+    ".cursor/projects",
+    ".config/Cursor/User/globalStorage/state.vscdb",
+    ".config/Cursor/User/globalStorage/state.vscdb-wal",
+    ".config/Cursor/User/workspaceStorage",
+    "AppData/Roaming/Cursor/User/globalStorage/state.vscdb",
+    "AppData/Roaming/Cursor/User/globalStorage/state.vscdb-wal",
+    "AppData/Roaming/Cursor/User/workspaceStorage",
     "AppData/Roaming/TRAE SOLO",
     "AppData/Roaming/TRAE SOLO CN",
+]
+
+# Noise inside the pulled directories: caches and logs no exporter reads.
+# Keeping them out matters most for .cursor/projects, where a single project
+# carries a multi-megabyte worker.log and a node_modules canvas SDK.
+VBOX_PULL_EXCLUDES = [
+    ".cursor/projects/*/worker.log",
+    ".cursor/projects/*/canvases",
+    ".cursor/projects/*/agent-tools",
+    "*/node_modules",
 ]
 
 _vbox_vm_cache: tuple[float, list[tuple[str, bool]]] = (0.0, [])
@@ -967,7 +985,11 @@ def _sync_ssh_machine(
         if profile is None:
             return False
         include = " ".join(f'"{p}"' for p in VBOX_PULL_RELPATHS)
-        remote = f'tar -c{"z" if compress else ""}f - -C "{profile.as_posix()}" {include}'
+        exclude = " ".join(f'--exclude="{p}"' for p in VBOX_PULL_EXCLUDES)
+        remote = (
+            f'tar -c{"z" if compress else ""}f - -C "{profile.as_posix()}"'
+            f" {exclude} {include}"
+        )
         pull_tar = staging_root / "pull.tar"
         try:
             with open(pull_tar, "wb") as fh:

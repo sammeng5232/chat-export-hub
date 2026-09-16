@@ -26,6 +26,7 @@ Unified desktop app for **live chat history exports** across multiple AI agents.
 | Continue | `~/continue_chat_live_exports` | `~/.continue/sessions` (Continue Chat Export Watcher) |
 | Pi Agent | `~/pi_chat_live_exports` | `~/.pi/agent/sessions` (Pi Chat Export Watcher) |
 | Qwen Code | `~/qwen_chat_live_exports` | `~/.qwen/projects/<cwd>/chats` (Qwen Code Chat Export Watcher) |
+| Cursor | `~/cursor_chat_live_exports` | Cursor IDE `User/globalStorage/state.vscdb` composers + `workspaceStorage` prompt history + cursor-agent CLI `~/.cursor` (Cursor Chat Export Watcher) |
 
 ## Watcher tasks
 
@@ -42,6 +43,7 @@ Scheduled tasks keep exports live (logon trigger + 5-minute revival, 30s scan in
 | Continue Chat Export Watcher | `install_continue_chat_export_task.ps1` |
 | Pi Chat Export Watcher | `install_pi_chat_export_task.ps1` |
 | Qwen Code Chat Export Watcher | `install_qwen_chat_export_task.ps1` |
+| Cursor Chat Export Watcher | `install_cursor_chat_export_task.ps1` |
 
 Agents without a watcher task export only when triggered from the hub UI.
 
@@ -129,6 +131,7 @@ No UI code changes required for simple agents that share the same state layout.
 - `export_continue_chats_live.py` — Continue extension
 - `export_pi_chats_live.py` — pi agent
 - `export_qwen_chats_live.py` — Qwen Code CLI
+- `export_cursor_chats_live.py` — Cursor (IDE composer/bubble store, workspace `aiService` history, cursor-agent CLI sessions and agent transcripts)
 - `split_claude_code_exports.py` — Claude Code CLI / GUI splitter (post-processes the combined exporter's output by session entrypoint: `cli` / `sdk-cli` / `claude-vscode` stay CLI, `claude-desktop` becomes GUI)
 - `grok_export_monitor.py` — Grok export monitor
 - `install_*_chat_export_task.ps1` — scheduled watcher installers
