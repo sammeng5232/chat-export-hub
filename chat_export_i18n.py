@@ -89,8 +89,22 @@ STRINGS: dict[str, dict[str, str]] = {
     # Table / filter
     "filter": {"en": "Filter:", "zh": "筛选："},
     "filter_placeholder": {
-        "en": "Filter by agent, title, session id, kind, model, path…",
-        "zh": "按代理、标题、会话 ID、类型、模型、路径筛选…",
+        "en": "Filter by agent, title, session id, kind, model, path, or message content…",
+        "zh": "按代理、标题、会话 ID、类型、模型、路径或正文内容筛选…",
+    },
+    "chk_content_search": {"en": "Search content", "zh": "搜索正文"},
+    "chk_content_search_tip": {
+        "en": (
+            "Also match keywords inside the exported conversation text, not just "
+            "titles/paths/models. Backed by a local SQLite FTS5 full-text index "
+            "(~/.grok/tools/chat_export_search_index.sqlite3) that is built and kept "
+            "up to date in the background."
+        ),
+        "zh": (
+            "同时匹配导出会话正文中的关键字,而不仅是标题/路径/模型等元数据。由本地 "
+            "SQLite FTS5 全文索引提供支持（~/.grok/tools/chat_export_search_index.sqlite3），"
+            "在后台自动建立并保持更新。"
+        ),
     },
     "count_exports": {
         "en": "{shown} / {total} exports",
@@ -135,6 +149,14 @@ STRINGS: dict[str, dict[str, str]] = {
         "zh": "数据重载 {ms:.0f} ms · {n} 条导出 · {size} · {time}",
     },
     "status_copied": {"en": "Copied: {path}", "zh": "已复制：{path}"},
+    "status_index_ready": {
+        "en": "Content index updated · {n} session(s) reindexed",
+        "zh": "正文索引已更新 · 重新索引 {n} 条会话",
+    },
+    "status_index_error": {
+        "en": "Content index error: {message}",
+        "zh": "正文索引出错：{message}",
+    },
     "status_export_bg": {
         "en": "Running export in background…",
         "zh": "正在后台导出…",

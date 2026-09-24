@@ -12,8 +12,9 @@ if (-not (Test-Path -LiteralPath $ico)) {
 
 & "$env:APPDATA\Python\Python314\Scripts\pyinstaller.exe" --noconfirm --clean --windowed --onefile `
   --name ChatExportHub --icon $ico --distpath "$tools\dist" --workpath "$tools\build" --specpath $tools `
-  --hidden-import chat_export_agents --hidden-import chat_export_i18n `
+  --hidden-import chat_export_agents --hidden-import chat_export_i18n --hidden-import chat_export_search_index `
   --add-data "$tools\chat_export_agents.py;." --add-data "$tools\chat_export_i18n.py;." `
+  --add-data "$tools\chat_export_search_index.py;." `
   --add-data "$ico;." `
   "$tools\chat_export_hub.py"
 

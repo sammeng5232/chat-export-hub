@@ -75,6 +75,7 @@ from PySide6.QtWidgets import (
 
 from chat_export_agents import AgentSpec, agent_by_id, enabled_agents
 from chat_export_i18n import LANG_EN, LANG_ZH, i18n
+from chat_export_search_index import SearchIndex
 
 HOME = Path.home()
 APP_VERSION = "2.3.0"
@@ -389,6 +390,7 @@ class ExportFilterProxy(QSortFilterProxyModel):
         super().__init__(parent)
         self._agent_id: str | None = None  # None = all
         self._needle = ""
+        self._content_matches: set[str] | None = None  # None = content search inactive
         self.setFilterCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         self.setSortRole(Qt.ItemDataRole.UserRole)
 
@@ -401,6 +403,16 @@ class ExportFilterProxy(QSortFilterProxyModel):
         needle = (text or "").strip().lower()
         if needle != self._needle:
             self._needle = needle
+            self.invalidateFilter()
+
+    def set_content_matches(self, matches: set[str] | None) -> None:
+        """Session file paths that matched the last full-text content search.
+
+        None means content search is inactive (checkbox off, or empty query);
+        rows are then filtered on metadata only, same as before this feature.
+        """
+        if matches != self._content_matches:
+            self._content_matches = matches
             self.invalidateFilter()
 
     def filterAcceptsRow(self, source_row: int, source_parent: QModelIndex) -> bool:  # noqa: N802
@@ -429,7 +441,9 @@ class ExportFilterProxy(QSortFilterProxyModel):
                 row.state,
             ]
         ).lower()
-        return self._needle in hay
+        if self._needle in hay:
+            return True
+        return self._content_matches is not None and row.output in self._content_matches
 
 
 class ExportWorker(QThread):
@@ -470,6 +484,48 @@ class ExportWorker(QThread):
             messages.append(f"{agent.short}: {out or 'ok'}")
         label = self.agents[0].id if len(self.agents) == 1 else "all"
         self.finished_ok.emit(label, "\n".join(messages))
+
+
+class IndexSyncWorker(QThread):
+    """Reindexes changed export files into the content search DB off the UI thread."""
+
+    finished_ok = Signal(int)
+    finished_err = Signal(str)
+
+    def __init__(
+        self, index: SearchIndex, records: list[tuple[str, str, str]], parent: QWidget | None = None
+    ) -> None:
+        super().__init__(parent)
+        self._index = index
+        self._records = records
+
+    def run(self) -> None:
+        try:
+            count = self._index.sync(self._records)
+        except Exception as exc:  # pragma: no cover - defensive, mirrors ExportWorker
+            self.finished_err.emit(str(exc))
+            return
+        self.finished_ok.emit(count)
+
+
+class IndexSearchWorker(QThread):
+    """Runs one content-search query against the FTS5 index off the UI thread."""
+
+    finished_ok = Signal(str, list)
+    finished_err = Signal(str, str)
+
+    def __init__(self, index: SearchIndex, query: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._index = index
+        self._query = query
+
+    def run(self) -> None:
+        try:
+            matches = self._index.search(self._query)
+        except Exception as exc:  # pragma: no cover - defensive, mirrors ExportWorker
+            self.finished_err.emit(self._query, str(exc))
+            return
+        self.finished_ok.emit(self._query, list(matches))
 
 
 class StatCard(QLabel):
@@ -525,6 +581,13 @@ class HubWindow(QMainWindow):
         self._log_fps: dict[str, tuple[int, int] | None] = {}
         self._last_log_text = ""
         self._status_cache: dict[str, dict[str, Any]] = {}
+
+        # Content search (SQLite FTS5 index over exported session bodies)
+        self._search_index = SearchIndex()
+        self._index_sync_worker: IndexSyncWorker | None = None
+        self._index_search_worker: IndexSearchWorker | None = None
+        self._pending_sync_records: list[tuple[str, str, str]] | None = None
+        self._pending_search_query: str | None = None
 
         self.setWindowTitle(f"{app_name()} v{APP_VERSION}")
         self.resize(1280, 800)
@@ -687,6 +750,10 @@ class HubWindow(QMainWindow):
         self._filter_timer.timeout.connect(self._apply_filter_now)
         self.search.textChanged.connect(lambda _t: self._filter_timer.start())
         search_row.addWidget(self.search, 1)
+        self.chk_content_search = QCheckBox()
+        self.chk_content_search.setChecked(True)
+        self.chk_content_search.toggled.connect(lambda _checked: self._apply_filter_now())
+        search_row.addWidget(self.chk_content_search)
         self.lbl_count = QLabel("")
         self.lbl_count.setStyleSheet("color:#a6adc8;")
         search_row.addWidget(self.lbl_count)
@@ -803,6 +870,8 @@ class HubWindow(QMainWindow):
 
         self.lbl_filter.setText(i18n.t("filter"))
         self.search.setPlaceholderText(i18n.t("filter_placeholder"))
+        self.chk_content_search.setText(i18n.t("chk_content_search"))
+        self.chk_content_search.setToolTip(i18n.t("chk_content_search_tip"))
         self.lbl_log.setText(i18n.t("log_label"))
         self.btn_open_export.setText(i18n.t("btn_open_export"))
         self.btn_reveal.setText(i18n.t("btn_reveal"))
@@ -914,8 +983,80 @@ class HubWindow(QMainWindow):
             self.status_timer.stop()
 
     def _apply_filter_now(self) -> None:
-        self.proxy.set_needle(self.search.text())
+        needle = self.search.text().strip()
+        self.proxy.set_needle(needle)
+        if self.chk_content_search.isChecked() and needle:
+            self._start_content_search(needle)
+        else:
+            self._pending_search_query = None
+            self.proxy.set_content_matches(None)
         self._update_count_label()
+
+    # --- content search (SQLite FTS5) -------------------------------------
+    def _start_content_search(self, needle: str) -> None:
+        if self._index_search_worker is not None and self._index_search_worker.isRunning():
+            self._pending_search_query = needle
+            return
+        self._pending_search_query = None
+        worker = IndexSearchWorker(self._search_index, needle, self)
+        worker.finished_ok.connect(self._on_content_search_ok)
+        worker.finished_err.connect(self._on_content_search_err)
+        self._index_search_worker = worker
+        worker.start()
+
+    def _on_content_search_ok(self, query: str, matches: list) -> None:
+        current = self.search.text().strip()
+        if self.chk_content_search.isChecked() and query == current:
+            self.proxy.set_content_matches(set(matches))
+            self._update_count_label()
+        self._drain_pending_search()
+
+    def _on_content_search_err(self, _query: str, _message: str) -> None:
+        # Non-fatal: content matches simply stay as they were; metadata
+        # filtering (title/path/session id/…) keeps working regardless.
+        self._drain_pending_search()
+
+    def _drain_pending_search(self) -> None:
+        pending = self._pending_search_query
+        self._pending_search_query = None
+        if pending is not None:
+            self._start_content_search(pending)
+
+    def _kick_content_sync(self) -> None:
+        records = [
+            (row.output, row.session_id, row.agent_id) for row in self._all_rows if row.output
+        ]
+        if self._index_sync_worker is not None and self._index_sync_worker.isRunning():
+            self._pending_sync_records = records
+            return
+        self._start_index_sync(records)
+
+    def _start_index_sync(self, records: list[tuple[str, str, str]]) -> None:
+        worker = IndexSyncWorker(self._search_index, records, self)
+        worker.finished_ok.connect(self._on_index_sync_ok)
+        worker.finished_err.connect(self._on_index_sync_err)
+        self._index_sync_worker = worker
+        worker.start()
+
+    def _on_index_sync_ok(self, count: int) -> None:
+        if count:
+            self.status.showMessage(i18n.t("status_index_ready", n=count), 4000)
+        pending = self._pending_sync_records
+        self._pending_sync_records = None
+        if pending is not None:
+            self._start_index_sync(pending)
+        elif count and self.chk_content_search.isChecked():
+            needle = self.search.text().strip()
+            if needle:
+                # Newly (re)indexed sessions may now match an active query.
+                self._start_content_search(needle)
+
+    def _on_index_sync_err(self, message: str) -> None:
+        self.status.showMessage(i18n.t("status_index_error", message=message), 4000)
+        pending = self._pending_sync_records
+        self._pending_sync_records = None
+        if pending is not None:
+            self._start_index_sync(pending)
 
     def _update_count_label(self) -> None:
         self.lbl_count.setText(
@@ -1003,6 +1144,7 @@ class HubWindow(QMainWindow):
 
         self._all_rows = self._collect_rows()
         self.model.set_rows(self._all_rows)
+        self._kick_content_sync()
         self._update_stats_from_rows()
         self.refresh_status_only()
         self._load_log(force=False)

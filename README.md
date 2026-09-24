@@ -93,6 +93,16 @@ needed. Tune with `CHAT_EXPORT_VBOX_SYNC_INTERVAL` (default 300) and
 - Live status chips per agent (LIVE / STALE / counts)
 - Combined stats: tracked files, size, messages, tool I/O
 - Filterable table of every export (Location column: Local / WSL / VM / SSH)
+- **Full-text session search** — the same filter box also matches keywords
+  inside the exported conversation text, not just title/path/model/session id.
+  Backed by a local SQLite FTS5 index (`~/.grok/tools/chat_export_search_index.sqlite3`)
+  that is built and kept incrementally up to date in the background (only
+  changed files are reindexed, by mtime/size fingerprint), so it never blocks
+  the UI. Uses FTS5's `trigram` tokenizer instead of the default `unicode61`
+  so short Chinese keywords (e.g. "报错", "登录") match correctly — `unicode61`
+  has no word-boundary concept inside a run of CJK characters, so 2-character
+  substrings would otherwise never match. Toggle it off with the "Search
+  content" checkbox to filter on metadata only.
 - Watcher log tail
 - **Export selected / Export all once**
 - Open export, reveal in Explorer, copy path, task status
@@ -120,6 +130,7 @@ No UI code changes required for simple agents that share the same state layout.
 - `chat_export_hub.py` — GUI
 - `chat_export_agents.py` — agent registry
 - `chat_export_i18n.py` — strings
+- `chat_export_search_index.py` — SQLite FTS5 (trigram) content search index used by the hub's "Search content" filter
 - `chat_export_common.py` — shared exporter helpers incl. WSL/VM remote-home discovery, SQLite staging, and outage-safe pruning
 - `export_grok_chats_live.py` — Grok exporter
 - `export_opencode_chats_live.py` — OpenCode exporter (session/message/part SQLite schema, reused by Kilo CLI)
