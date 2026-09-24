@@ -89,8 +89,8 @@ STRINGS: dict[str, dict[str, str]] = {
     # Table / filter
     "filter": {"en": "Filter:", "zh": "筛选："},
     "filter_placeholder": {
-        "en": "Filter by agent, title, session id, kind, model, path, or message content…",
-        "zh": "按代理、标题、会话 ID、类型、模型、路径或正文内容筛选…",
+        "en": "Filter by agent, title, session id, kind, model, path… (+ content when checked)",
+        "zh": "按代理、标题、会话 ID、类型、模型、路径筛选…（勾选“搜索正文”后同时匹配正文）",
     },
     "chk_content_search": {"en": "Search content", "zh": "搜索正文"},
     "chk_content_search_tip": {
@@ -156,6 +156,11 @@ STRINGS: dict[str, dict[str, str]] = {
     "status_index_error": {
         "en": "Content index error: {message}",
         "zh": "正文索引出错：{message}",
+    },
+    "status_indexing": {"en": "Indexing content…", "zh": "正在建立正文索引…"},
+    "status_search_truncated": {
+        "en": "Content search matched more than {n} sessions; showing the first {n}. Narrow your query for a complete list.",
+        "zh": "正文搜索匹配的会话超过 {n} 条,仅显示前 {n} 条。请缩小关键词范围以获得完整结果。",
     },
     "status_export_bg": {
         "en": "Running export in background…",

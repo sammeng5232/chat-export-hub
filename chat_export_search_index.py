@@ -109,19 +109,40 @@ class SearchIndex:
                     reindexed += 1
 
                 for path in existing:
-                    if path not in wanted:
-                        conn.execute("DELETE FROM content_fts WHERE path = ?", (path,))
-                        conn.execute("DELETE FROM files WHERE path = ?", (path,))
+                    if path in wanted:
+                        continue
+                    # The caller's record set can be transiently incomplete
+                    # (e.g. one agent's state file was briefly unreadable this
+                    # poll cycle) without any export file actually vanishing.
+                    # Only treat a path as deleted once the file itself is
+                    # gone, so a caller-side hiccup can never silently wipe
+                    # good entries out of the index.
+                    if os.path.exists(path):
+                        continue
+                    conn.execute("DELETE FROM content_fts WHERE path = ?", (path,))
+                    conn.execute("DELETE FROM files WHERE path = ?", (path,))
             return reindexed
         finally:
             conn.close()
 
-    def search(self, needle: str, limit: int = 5000) -> set[str]:
-        """Return the set of file paths whose body contains every token in
-        ``needle`` (whitespace-split, ANDed, case-insensitive substrings)."""
-        tokens = [t for t in (needle or "").split() if t]
+    def search(self, needle: str, limit: int = 5000) -> tuple[set[str], bool]:
+        """Return (matching file paths, whether the result was truncated).
+
+        ``needle`` is whitespace-split into tokens that must ALL be present
+        (ANDed), case-insensitive substrings. Tokens of 3+ characters are
+        matched via FTS5 MATCH (fast, indexed); shorter tokens (including
+        common 2-character CJK words) fall back to a LIKE scan, since the
+        trigram tokenizer has no grams to match on below 3 characters.
+        """
+        # Control characters can never meaningfully appear in a real search
+        # term and (e.g. an embedded NUL) can break out of a quoted MATCH
+        # phrase and raise sqlite3.OperationalError; strip them so a stray
+        # control byte degrades gracefully instead of masquerading as "no
+        # results found".
+        cleaned = "".join(ch for ch in (needle or "") if ch >= " " or ch.isspace())
+        tokens = [t for t in cleaned.split() if t]
         if not tokens:
-            return set()
+            return set(), False
 
         match_terms: list[str] = []
         like_params: list[str] = []
@@ -141,19 +162,21 @@ class SearchIndex:
             clauses.append("body LIKE ? ESCAPE '\\'")
             params.append(pat)
         if not clauses:
-            return set()
+            return set(), False
 
         conn = self._connect()
         try:
             sql = (
                 "SELECT DISTINCT path FROM content_fts WHERE "
                 + " AND ".join(clauses)
-                + " LIMIT ?"
+                + " ORDER BY path LIMIT ?"
             )
-            params.append(limit)
+            params.append(limit + 1)
             rows = conn.execute(sql, params).fetchall()
-            return {row[0] for row in rows}
+            paths = [row[0] for row in rows]
+            truncated = len(paths) > limit
+            return set(paths[:limit]), truncated
         except sqlite3.OperationalError:
-            return set()
+            return set(), False
         finally:
             conn.close()

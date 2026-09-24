@@ -511,7 +511,7 @@ class IndexSyncWorker(QThread):
 class IndexSearchWorker(QThread):
     """Runs one content-search query against the FTS5 index off the UI thread."""
 
-    finished_ok = Signal(str, list)
+    finished_ok = Signal(str, list, bool)
     finished_err = Signal(str, str)
 
     def __init__(self, index: SearchIndex, query: str, parent: QWidget | None = None) -> None:
@@ -521,11 +521,11 @@ class IndexSearchWorker(QThread):
 
     def run(self) -> None:
         try:
-            matches = self._index.search(self._query)
+            matches, truncated = self._index.search(self._query)
         except Exception as exc:  # pragma: no cover - defensive, mirrors ExportWorker
             self.finished_err.emit(self._query, str(exc))
             return
-        self.finished_ok.emit(self._query, list(matches))
+        self.finished_ok.emit(self._query, list(matches), truncated)
 
 
 class StatCard(QLabel):
@@ -754,6 +754,9 @@ class HubWindow(QMainWindow):
         self.chk_content_search.setChecked(True)
         self.chk_content_search.toggled.connect(lambda _checked: self._apply_filter_now())
         search_row.addWidget(self.chk_content_search)
+        self.lbl_indexing = QLabel("")
+        self.lbl_indexing.setStyleSheet("color:#f9e2af;")
+        search_row.addWidget(self.lbl_indexing)
         self.lbl_count = QLabel("")
         self.lbl_count.setStyleSheet("color:#a6adc8;")
         search_row.addWidget(self.lbl_count)
@@ -1004,11 +1007,13 @@ class HubWindow(QMainWindow):
         self._index_search_worker = worker
         worker.start()
 
-    def _on_content_search_ok(self, query: str, matches: list) -> None:
+    def _on_content_search_ok(self, query: str, matches: list, truncated: bool) -> None:
         current = self.search.text().strip()
         if self.chk_content_search.isChecked() and query == current:
             self.proxy.set_content_matches(set(matches))
             self._update_count_label()
+            if truncated:
+                self.status.showMessage(i18n.t("status_search_truncated", n=len(matches)), 5000)
         self._drain_pending_search()
 
     def _on_content_search_err(self, _query: str, _message: str) -> None:
@@ -1032,6 +1037,12 @@ class HubWindow(QMainWindow):
         self._start_index_sync(records)
 
     def _start_index_sync(self, records: list[tuple[str, str, str]]) -> None:
+        # Persistent label (not the status bar, which gets overwritten within
+        # the same refresh_data() call by status_uptodate/status_reload) so a
+        # search fired while the first/a large sync is still catching up has
+        # a visible reason for returning incomplete results. Mirrors the
+        # existing lbl_exporting pattern used for the export flow.
+        self.lbl_indexing.setText(i18n.t("status_indexing"))
         worker = IndexSyncWorker(self._search_index, records, self)
         worker.finished_ok.connect(self._on_index_sync_ok)
         worker.finished_err.connect(self._on_index_sync_err)
@@ -1039,6 +1050,7 @@ class HubWindow(QMainWindow):
         worker.start()
 
     def _on_index_sync_ok(self, count: int) -> None:
+        self.lbl_indexing.setText("")
         if count:
             self.status.showMessage(i18n.t("status_index_ready", n=count), 4000)
         pending = self._pending_sync_records
@@ -1052,6 +1064,7 @@ class HubWindow(QMainWindow):
                 self._start_content_search(needle)
 
     def _on_index_sync_err(self, message: str) -> None:
+        self.lbl_indexing.setText("")
         self.status.showMessage(i18n.t("status_index_error", message=message), 4000)
         pending = self._pending_sync_records
         self._pending_sync_records = None
